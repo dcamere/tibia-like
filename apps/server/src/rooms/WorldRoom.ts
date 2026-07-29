@@ -1,14 +1,18 @@
 import { Client, Room } from '@colyseus/core';
 
 import {
+    type ChatMessagePayload,
     CLIENT_TO_SERVER_MESSAGE,
     DIRECTION_DELTAS,
     DIRECTIONS,
     isAttackInput,
+    isChatSendInput,
     isMoveInput,
+    isWorldJoinOptions,
     isWalkableTile,
     MAP_HEIGHT_IN_TILES,
     MAP_WIDTH_IN_TILES,
+    SERVER_TO_CLIENT_MESSAGE,
     WORLD_ROOM_NAME,
     type CreatureId,
     type CreatureType,
@@ -16,8 +20,22 @@ import {
 } from '@tibia-like/shared';
 
 import { CreatureState } from '../state/CreatureState';
+import {
+    getAccountCharacter,
+    getSessionByToken,
+    type AuthSession
+} from '../auth/AuthService';
 import { PlayerState } from '../state/PlayerState';
 import { WorldState } from '../state/WorldState';
+
+type RoomAuthData = AuthSession & {
+    characterId: string;
+    characterName: string;
+};
+
+const CHAT_MAX_LENGTH = 180;
+const CHAT_COOLDOWN_MS = 250;
+const CHAT_LOCAL_RANGE_IN_TILES = 7;
 
 const SPAWN_TILES: readonly TilePosition[] = [
     { tileX: 5, tileY: 5 },
@@ -77,9 +95,39 @@ export { WORLD_ROOM_NAME };
 export class WorldRoom extends Room {
     declare state: WorldState;
 
+    onAuth(_client: Client, options: unknown): RoomAuthData {
+        if (!isWorldJoinOptions(options)) {
+            throw new Error('Missing authentication payload.');
+        }
+
+        const session = getSessionByToken(options.authToken);
+
+        if (session === null) {
+            throw new Error('Authentication required.');
+        }
+
+        const character = getAccountCharacter(
+            session.accountId,
+            options.characterId
+        );
+
+        if (character === null) {
+            throw new Error('Invalid character selection.');
+        }
+
+        return {
+            accountId: session.accountId,
+            username: session.username,
+            role: session.role,
+            characterId: character.id,
+            characterName: character.name
+        };
+    }
+
     private nextSpawnIndex = 0;
     private readonly lastMoveAtByPlayer = new Map<string, number>();
     private readonly lastAttackAtByPlayer = new Map<string, number>();
+    private readonly lastChatAtByPlayer = new Map<string, number>();
 
     onCreate(): void {
         this.setState(new WorldState());
@@ -93,6 +141,20 @@ export class WorldRoom extends Room {
             this.handlePlayerAttack(client, payload);
         });
 
+        this.onMessage(CLIENT_TO_SERVER_MESSAGE.CHAT_SEND, (client, payload: unknown) => {
+            try {
+                this.handleChatSend(client, payload);
+            } catch (error: unknown) {
+                const message =
+                    error instanceof Error
+                        ? error.message
+                        : 'Unknown chat processing error.';
+
+                console.error('[WorldRoom] chat handler failed', message);
+                this.sendSystemMessage(client.sessionId, 'Error procesando el chat.');
+            }
+        });
+
         this.setSimulationInterval(() => {
             this.tickCreatures();
         }, CREATURE_MOVE_INTERVAL_MS);
@@ -100,12 +162,18 @@ export class WorldRoom extends Room {
         console.info(`[WorldRoom] created room ${this.roomId}`);
     }
 
-    onJoin(client: Client, options: unknown): void {
+    onJoin(client: Client, _options: unknown): void {
+        const auth = client.auth as RoomAuthData | undefined;
+
+        if (!auth) {
+            throw new Error('Missing authenticated session.');
+        }
+
         const spawnTile = this.getNextSpawnTile();
 
         const player = new PlayerState();
         player.id = client.sessionId;
-        player.name = this.resolvePlayerName(client.sessionId, options);
+        player.name = auth.characterName;
         player.tileX = spawnTile.tileX;
         player.tileY = spawnTile.tileY;
 
@@ -118,6 +186,7 @@ export class WorldRoom extends Room {
         this.state.players.delete(client.sessionId);
         this.lastMoveAtByPlayer.delete(client.sessionId);
         this.lastAttackAtByPlayer.delete(client.sessionId);
+        this.lastChatAtByPlayer.delete(client.sessionId);
 
         console.info(`[WorldRoom] ${client.sessionId} left`);
     }
@@ -195,6 +264,221 @@ export class WorldRoom extends Room {
         }
     }
 
+    private handleChatSend(client: Client, payload: unknown): void {
+        const sender = this.state.players.get(client.sessionId);
+
+        if (!sender || !isChatSendInput(payload)) {
+            return;
+        }
+
+        const now = Date.now();
+        const lastChatAt = this.lastChatAtByPlayer.get(client.sessionId) ?? 0;
+
+        if (now - lastChatAt < CHAT_COOLDOWN_MS) {
+            return;
+        }
+
+        this.lastChatAtByPlayer.set(client.sessionId, now);
+
+        const text = payload.text.trim().slice(0, CHAT_MAX_LENGTH);
+
+        if (text.length === 0) {
+            return;
+        }
+
+        if (text.startsWith('/')) {
+            this.handleChatCommand(client, sender, text);
+            return;
+        }
+
+        this.sendLocalChat(sender.id, sender.name, text);
+    }
+
+    private handleChatCommand(
+        client: Client,
+        sender: PlayerState,
+        text: string
+    ): void {
+        const [command, ...parts] = text.split(' ');
+        const commandName = command.toLowerCase();
+
+        if (commandName === '/help') {
+            this.sendSystemMessage(
+                client.sessionId,
+                'Comandos: /help, /w <mensaje>, /pm <nombre> <mensaje>, /announce <mensaje> (solo GM).'
+            );
+            return;
+        }
+
+        if (commandName === '/w') {
+            const message = parts.join(' ').trim();
+
+            if (!message) {
+                this.sendSystemMessage(client.sessionId, 'Uso: /w <mensaje>');
+                return;
+            }
+
+            this.broadcastChat({
+                channel: 'world',
+                from: sender.name,
+                text: message
+            });
+
+            return;
+        }
+
+        if (commandName === '/pm') {
+            const targetName = parts.shift()?.trim() ?? '';
+            const message = parts.join(' ').trim();
+
+            if (!targetName || !message) {
+                this.sendSystemMessage(client.sessionId, 'Uso: /pm <nombre> <mensaje>');
+                return;
+            }
+
+            const target = this.findPlayerByName(targetName);
+
+            if (!target) {
+                this.sendSystemMessage(client.sessionId, `No se encontro el jugador ${targetName}.`);
+                return;
+            }
+
+            const chatPayload: ChatMessagePayload = {
+                channel: 'private',
+                from: sender.name,
+                target: target.name,
+                text: message
+            };
+
+            this.sendChatToSession(sender.id, chatPayload);
+
+            if (target.id !== sender.id) {
+                this.sendChatToSession(target.id, chatPayload);
+            }
+
+            return;
+        }
+
+        if (commandName === '/announce') {
+            const auth = client.auth as RoomAuthData | undefined;
+
+            if (!auth || auth.role !== 'gm') {
+                this.sendSystemMessage(client.sessionId, 'Comando reservado para GM.');
+                return;
+            }
+
+            const message = parts.join(' ').trim();
+
+            if (!message) {
+                this.sendSystemMessage(client.sessionId, 'Uso: /announce <mensaje>');
+                return;
+            }
+
+            this.broadcastChat({
+                channel: 'system',
+                from: 'GM',
+                text: message
+            });
+
+            return;
+        }
+
+        this.sendSystemMessage(client.sessionId, `Comando desconocido: ${commandName}`);
+    }
+
+    private sendLocalChat(
+        senderSessionId: string,
+        senderName: string,
+        text: string
+    ): void {
+        const sender = this.state.players.get(senderSessionId);
+
+        if (!sender) {
+            return;
+        }
+
+        for (const [targetSessionId, target] of this.state.players.entries()) {
+            const distanceX = Math.abs(sender.tileX - target.tileX);
+            const distanceY = Math.abs(sender.tileY - target.tileY);
+            const isInRange =
+                Math.max(distanceX, distanceY) <= CHAT_LOCAL_RANGE_IN_TILES;
+
+            if (!isInRange) {
+                continue;
+            }
+
+            this.sendChatToSession(targetSessionId, {
+                channel: 'local',
+                from: senderName,
+                text
+            });
+        }
+    }
+
+    private broadcastChat(payload: ChatMessagePayload): void {
+        this.broadcast(SERVER_TO_CLIENT_MESSAGE.CHAT_MESSAGE, payload);
+    }
+
+    private sendChatToSession(
+        sessionId: string,
+        payload: ChatMessagePayload
+    ): void {
+        const client = this.getClientBySessionId(sessionId);
+
+        if (!client) {
+            return;
+        }
+
+        try {
+            client.send(SERVER_TO_CLIENT_MESSAGE.CHAT_MESSAGE, payload);
+        } catch (error: unknown) {
+            const message =
+                error instanceof Error
+                    ? error.message
+                    : 'Unknown send error.';
+
+            console.error('[WorldRoom] failed to send chat message', message);
+        }
+    }
+
+    private sendSystemMessage(sessionId: string, text: string): void {
+        this.sendChatToSession(sessionId, {
+            channel: 'system',
+            from: 'System',
+            text
+        });
+    }
+
+    private findPlayerByName(name: string): PlayerState | null {
+        const targetName = name.toLowerCase();
+
+        for (const player of this.state.players.values()) {
+            if (player.name.toLowerCase() === targetName) {
+                return player;
+            }
+        }
+
+        return null;
+    }
+
+    private getClientBySessionId(sessionId: string): Client | null {
+        const clientsWithGetById = this.clients as {
+            getById?: (id: string) => Client | undefined;
+        };
+
+        if (typeof clientsWithGetById.getById === 'function') {
+            return clientsWithGetById.getById(sessionId) ?? null;
+        }
+
+        for (const client of this.clients) {
+            if (client.sessionId === sessionId) {
+                return client;
+            }
+        }
+
+        return null;
+    }
+
     private isInAttackRange(
         attackerTileX: number,
         attackerTileY: number,
@@ -235,28 +519,6 @@ export class WorldRoom extends Room {
 
         this.nextSpawnIndex = (this.nextSpawnIndex + 1) % spawnCount;
         return DEFAULT_SPAWN_TILE;
-    }
-
-    private resolvePlayerName(sessionId: string, options: unknown): string {
-        const fallbackName = `Player-${sessionId.slice(0, 4)}`;
-
-        if (typeof options !== 'object' || options === null) {
-            return fallbackName;
-        }
-
-        const candidate = (options as { name?: unknown }).name;
-
-        if (typeof candidate !== 'string') {
-            return fallbackName;
-        }
-
-        const normalizedName = candidate.trim().slice(0, 20);
-
-        if (normalizedName.length === 0) {
-            return fallbackName;
-        }
-
-        return normalizedName;
     }
 
     private initializeRoomCreatures(): void {

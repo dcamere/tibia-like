@@ -1,5 +1,10 @@
 import { GameObjects, Scene } from 'phaser';
+import type { Direction } from '@tibia-like/shared';
 
+import {
+    ensureMedievalSpriteTextures,
+    getMedievalPlayerTexture
+} from '../rendering/MedievalSprites';
 import { tileToWorldPosition } from '../world/coordinates';
 
 type PlayerOptions = {
@@ -17,8 +22,8 @@ const HEALTH_BAR_OFFSET_Y = -20;
 /**
  * Represents the local player entity: its logical tile position, its
  * health, and its visual representation. Placeholder rectangle body for
- * now; will be swapped for a sprite later without changing the public
- * API. Health tracking lives here locally for the prototype, but through
+ * now using directional medieval sprites. Health tracking lives here locally
+ * for the prototype, but through
  * the same kind of small surface (takeDamage) used by Creature, so it
  * can later be driven by authoritative server state instead.
  */
@@ -36,6 +41,8 @@ export class Player {
     private readonly scene: Scene;
     private readonly tileSize: number;
     private readonly healthBarFill: GameObjects.Rectangle;
+    private readonly bodySprite: GameObjects.Image;
+    private facingDirection: Direction = 'down';
 
     constructor(scene: Scene, options: PlayerOptions) {
         this.scene = scene;
@@ -55,15 +62,17 @@ export class Player {
             this.tileSize
         );
 
-        const body = scene.add
-            .rectangle(
-                0,
-                0,
-                this.tileSize - 6,
-                this.tileSize - 6,
-                0x3b82f6
-            )
-            .setStrokeStyle(2, 0xffffff);
+        ensureMedievalSpriteTextures(scene);
+
+        const initialTexture = getMedievalPlayerTexture(
+            scene,
+            this.facingDirection,
+            false
+        );
+
+        this.bodySprite = scene.add
+            .image(0, 1, initialTexture.textureKey, initialTexture.frame)
+            .setDisplaySize(this.tileSize - 4, this.tileSize - 4);
 
         const nameLabel = scene.add
             .text(0, -25, options.name, {
@@ -98,7 +107,7 @@ export class Player {
         this.gameObject = scene.add.container(
             position.x,
             position.y,
-            [body, healthBarBackground, this.healthBarFill, nameLabel]
+            [this.bodySprite, healthBarBackground, this.healthBarFill, nameLabel]
         );
 
         this.gameObject.setDepth(10);
@@ -114,6 +123,14 @@ export class Player {
         tileY: number,
         durationMs: number
     ): void {
+        const direction = this.resolveDirection(
+            this.tileX,
+            this.tileY,
+            tileX,
+            tileY
+        );
+
+        this.facingDirection = direction;
         this.tileX = tileX;
         this.tileY = tileY;
 
@@ -125,13 +142,71 @@ export class Player {
 
         this.scene.tweens.killTweensOf(this.gameObject);
 
+        if (durationMs > 0) {
+            const walkTexture = getMedievalPlayerTexture(
+                this.scene,
+                this.facingDirection,
+                true
+            );
+
+            this.bodySprite.setTexture(walkTexture.textureKey, walkTexture.frame);
+        } else {
+            const idleTexture = getMedievalPlayerTexture(
+                this.scene,
+                this.facingDirection,
+                false
+            );
+
+            this.bodySprite.setTexture(idleTexture.textureKey, idleTexture.frame);
+        }
+
         this.scene.tweens.add({
             targets: this.gameObject,
             x: position.x,
             y: position.y,
             duration: durationMs,
-            ease: 'Linear'
+            ease: 'Linear',
+            onComplete: () => {
+                const idleTexture = getMedievalPlayerTexture(
+                    this.scene,
+                    this.facingDirection,
+                    false
+                );
+
+                this.bodySprite.setTexture(
+                    idleTexture.textureKey,
+                    idleTexture.frame
+                );
+            }
         });
+    }
+
+    private resolveDirection(
+        fromTileX: number,
+        fromTileY: number,
+        toTileX: number,
+        toTileY: number
+    ): Direction {
+        const deltaX = toTileX - fromTileX;
+        const deltaY = toTileY - fromTileY;
+
+        if (deltaX < 0) {
+            return 'left';
+        }
+
+        if (deltaX > 0) {
+            return 'right';
+        }
+
+        if (deltaY < 0) {
+            return 'up';
+        }
+
+        if (deltaY > 0) {
+            return 'down';
+        }
+
+        return this.facingDirection;
     }
 
     private updateHealthBar(): void {

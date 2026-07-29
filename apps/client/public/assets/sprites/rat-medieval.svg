@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="32" viewBox="0 0 256 32">
+  <defs>
+    <g id="rat-base">
+      <ellipse cx="16" cy="18" rx="9" ry="5.5" fill="#5a4638"/>
+      <ellipse cx="12" cy="14" rx="4" ry="3.5" fill="#806454"/>
+    </g>
+  </defs>
+
+  <g transform="translate(0 0)">
+    <use href="#rat-base"/>
+    <circle cx="10" cy="11" r="2" fill="#b48d8d"/>
+    <circle cx="15" cy="10" r="2" fill="#b48d8d"/>
+    <rect x="15" y="23" width="2" height="6" fill="#8f7676"/>
+  </g>
+
+  <g transform="translate(32 0)">
+    <use href="#rat-base"/>
+    <circle cx="10" cy="11" r="2" fill="#b48d8d"/>
+    <circle cx="15" cy="10" r="2" fill="#b48d8d"/>
+    <rect x="15" y="23" width="2" height="6" fill="#8f7676"/>
+    <rect x="11" y="21" width="2" height="3" fill="#4a382d"/>
+    <rect x="17" y="22" width="2" height="2" fill="#4a382d"/>
+  </g>
+
+  <g transform="translate(64 0)">
+    <use href="#rat-base"/>
+    <circle cx="10" cy="11" r="2" fill="#b48d8d"/>
+    <circle cx="15" cy="10" r="2" fill="#b48d8d"/>
+    <rect x="15" y="19" width="2" height="6" fill="#8f7676"/>
+  </g>
+
+  <g transform="translate(96 0)">
+    <use href="#rat-base"/>
+    <circle cx="10" cy="11" r="2" fill="#b48d8d"/>
+    <circle cx="15" cy="10" r="2" fill="#b48d8d"/>
+    <rect x="15" y="19" width="2" height="6" fill="#8f7676"/>
+    <rect x="11" y="21" width="2" height="3" fill="#4a382d"/>
+    <rect x="17" y="22" width="2" height="2" fill="#4a382d"/>
+  </g>
+
+  <g transform="translate(128 0)">
+    <use href="#rat-base"/>
+    <circle cx="8" cy="12" r="2" fill="#b48d8d"/>
+    <circle cx="12" cy="10" r="2" fill="#b48d8d"/>
+    <rect x="4" y="19" width="6" height="2" fill="#8f7676"/>
+  </g>
+
+  <g transform="translate(160 0)">
+    <use href="#rat-base"/>
+    <circle cx="8" cy="12" r="2" fill="#b48d8d"/>
+    <circle cx="12" cy="10" r="2" fill="#b48d8d"/>
+    <rect x="4" y="19" width="6" height="2" fill="#8f7676"/>
+    <rect x="11" y="21" width="2" height="3" fill="#4a382d"/>
+    <rect x="17" y="22" width="2" height="2" fill="#4a382d"/>
+  </g>
+
+  <g transform="translate(192 0)">
+    <use href="#rat-base"/>
+    <circle cx="20" cy="10" r="2" fill="#b48d8d"/>
+    <circle cx="24" cy="12" r="2" fill="#b48d8d"/>
+    <rect x="22" y="19" width="6" height="2" fill="#8f7676"/>
+  </g>
+
+  <g transform="translate(224 0)">
+    <use href="#rat-base"/>
+    <circle cx="20" cy="10" r="2" fill="#b48d8d"/>
+    <circle cx="24" cy="12" r="2" fill="#b48d8d"/>
+    <rect x="22" y="19" width="6" height="2" fill="#8f7676"/>
+    <rect x="11" y="21" width="2" height="3" fill="#4a382d"/>
+    <rect x="17" y="22" width="2" height="2" fill="#4a382d"/>
+  </g>
+</svg>

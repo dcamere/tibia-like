@@ -1,7 +1,14 @@
 import { GameObjects, Scene } from 'phaser';
 
-import { EntityId } from '@tibia-like/shared';
+import {
+    EntityId,
+    type Direction
+} from '@tibia-like/shared';
 
+import {
+    ensureMedievalSpriteTextures,
+    getMedievalRatTexture
+} from '../rendering/MedievalSprites';
 import { tileToWorldPosition, WorldPosition } from '../world/coordinates';
 
 type CreatureOptions = {
@@ -49,6 +56,8 @@ export class Creature {
     private readonly container: GameObjects.Container;
     private readonly selectionRing: GameObjects.Rectangle;
     private readonly healthBarFill: GameObjects.Rectangle;
+    private readonly bodySprite: GameObjects.Image;
+    private facingDirection: Direction = 'down';
 
     private onClickHandler: (() => void) | null = null;
 
@@ -74,29 +83,17 @@ export class Creature {
             this.tileSize
         );
 
-        const body = scene.add
-            .ellipse(
-                0,
-                2,
-                this.tileSize - 10,
-                this.tileSize - 16,
-                0x8b7355
-            )
-            .setStrokeStyle(2, 0x3f3327);
+        ensureMedievalSpriteTextures(scene);
 
-        const leftEar = scene.add.circle(
-            -7,
-            -7,
-            4,
-            0xc58f8f
+        const initialTexture = getMedievalRatTexture(
+            scene,
+            this.facingDirection,
+            false
         );
 
-        const rightEar = scene.add.circle(
-            7,
-            -7,
-            4,
-            0xc58f8f
-        );
+        this.bodySprite = scene.add
+            .image(0, 2, initialTexture.textureKey, initialTexture.frame)
+            .setDisplaySize(this.tileSize - 6, this.tileSize - 6);
 
         const nameLabel = scene.add
             .text(0, -25, options.name, {
@@ -145,9 +142,7 @@ export class Creature {
             position.y,
             [
                 this.selectionRing,
-                body,
-                leftEar,
-                rightEar,
+                this.bodySprite,
                 healthBarBackground,
                 this.healthBarFill,
                 nameLabel
@@ -202,6 +197,14 @@ export class Creature {
         this.container.setPosition(position.x, position.y);
         this.container.setAlpha(1);
         this.container.setInteractive();
+        this.facingDirection = 'down';
+        const idleTexture = getMedievalRatTexture(
+            this.scene,
+            this.facingDirection,
+            false
+        );
+
+        this.bodySprite.setTexture(idleTexture.textureKey, idleTexture.frame);
     }
 
     public moveTo(
@@ -212,6 +215,13 @@ export class Creature {
         if (!this.isAlive) {
             return;
         }
+
+        this.facingDirection = this.resolveDirection(
+            this.tileX,
+            this.tileY,
+            tileX,
+            tileY
+        );
 
         this.tileX = tileX;
         this.tileY = tileY;
@@ -224,12 +234,32 @@ export class Creature {
 
         this.scene.tweens.killTweensOf(this.container);
 
+        const walkTexture = getMedievalRatTexture(
+            this.scene,
+            this.facingDirection,
+            true
+        );
+
+        this.bodySprite.setTexture(walkTexture.textureKey, walkTexture.frame);
+
         this.scene.tweens.add({
             targets: this.container,
             x: position.x,
             y: position.y,
             duration: durationMs,
-            ease: 'Linear'
+            ease: 'Linear',
+            onComplete: () => {
+                const idleTexture = getMedievalRatTexture(
+                    this.scene,
+                    this.facingDirection,
+                    false
+                );
+
+                this.bodySprite.setTexture(
+                    idleTexture.textureKey,
+                    idleTexture.frame
+                );
+            }
         });
     }
 
@@ -237,6 +267,16 @@ export class Creature {
         state: CreatureSyncState,
         durationMs: number
     ): void {
+        const previousTileX = this.tileX;
+        const previousTileY = this.tileY;
+
+        this.facingDirection = this.resolveDirection(
+            previousTileX,
+            previousTileY,
+            state.tileX,
+            state.tileY
+        );
+
         const nextHealth = Math.max(
             0,
             Math.min(this.maxHealth, state.currentHealth)
@@ -261,14 +301,44 @@ export class Creature {
             this.container.setInteractive();
 
             if (durationMs > 0) {
+                const walkTexture = getMedievalRatTexture(
+                    this.scene,
+                    this.facingDirection,
+                    true
+                );
+
+                this.bodySprite.setTexture(
+                    walkTexture.textureKey,
+                    walkTexture.frame
+                );
+
                 this.scene.tweens.add({
                     targets: this.container,
                     x: position.x,
                     y: position.y,
                     duration: durationMs,
-                    ease: 'Linear'
+                    ease: 'Linear',
+                    onComplete: () => {
+                        const idleTexture = getMedievalRatTexture(
+                            this.scene,
+                            this.facingDirection,
+                            false
+                        );
+
+                        this.bodySprite.setTexture(
+                            idleTexture.textureKey,
+                            idleTexture.frame
+                        );
+                    }
                 });
             } else {
+                const idleTexture = getMedievalRatTexture(
+                    this.scene,
+                    this.facingDirection,
+                    false
+                );
+
+                this.bodySprite.setTexture(idleTexture.textureKey, idleTexture.frame);
                 this.container.setPosition(position.x, position.y);
             }
 
@@ -299,6 +369,41 @@ export class Creature {
         this.setSelected(false);
         this.container.disableInteractive();
         this.container.setAlpha(0.3);
+        const idleTexture = getMedievalRatTexture(
+            this.scene,
+            this.facingDirection,
+            false
+        );
+
+        this.bodySprite.setTexture(idleTexture.textureKey, idleTexture.frame);
+    }
+
+    private resolveDirection(
+        fromTileX: number,
+        fromTileY: number,
+        toTileX: number,
+        toTileY: number
+    ): Direction {
+        const deltaX = toTileX - fromTileX;
+        const deltaY = toTileY - fromTileY;
+
+        if (deltaX < 0) {
+            return 'left';
+        }
+
+        if (deltaX > 0) {
+            return 'right';
+        }
+
+        if (deltaY < 0) {
+            return 'up';
+        }
+
+        if (deltaY > 0) {
+            return 'down';
+        }
+
+        return this.facingDirection;
     }
 
     private updateHealthBar(): void {

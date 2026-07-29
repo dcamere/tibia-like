@@ -1,7 +1,17 @@
 import { GameObjects, Scene } from 'phaser';
 import { Client as ColyseusClient, Room } from 'colyseus.js';
 import {
+    type AuthCharactersResponse,
+    type AuthCreateCharacterResponse,
+    type AuthLoginResponse,
+    type AuthRegisterResponse,
+    type ChatSendInput,
+    type CharacterSummary,
     CLIENT_TO_SERVER_MESSAGE,
+    type Direction,
+    isChatMessagePayload,
+    isChatSendInput,
+    SERVER_TO_CLIENT_MESSAGE,
     WORLD_ROOM_NAME,
     type AttackInput,
     type MoveInput
@@ -10,6 +20,11 @@ import {
 import { Creature } from '../entities/Creature';
 import { Player } from '../entities/Player';
 import { KeyboardController } from '../input/KeyboardController';
+import {
+    ensureMedievalSpriteTextures,
+    getMedievalPlayerTexture,
+    preloadMedievalSpriteSheets
+} from '../rendering/MedievalSprites';
 import { tileToWorldPosition } from '../world/coordinates';
 
 import {
@@ -75,12 +90,21 @@ type SeatReservationPayload = {
     protocol?: string;
 };
 
+type AuthMode = 'login' | 'register';
+
+type AuthSessionResult = {
+    playerName: string;
+    characterId: string;
+    token: string;
+};
+
 type NetworkPlayerVisual = {
     container: GameObjects.Container;
-    body: GameObjects.Rectangle;
+    body: GameObjects.Image;
     nameLabel: GameObjects.Text;
     tileX: number;
     tileY: number;
+    facingDirection: Direction;
 };
 
 export class Game extends Scene {
@@ -98,8 +122,11 @@ export class Game extends Scene {
     private localSessionId: string | null = null;
     private isConnectingToRoom = false;
     private localPlayerName = '';
+    private localCharacterId: string | null = null;
+    private authToken: string | null = null;
     private hasAppliedServerSpawn = false;
     private isGameReady = false;
+    private chatInputElement: HTMLInputElement | null = null;
 
     private readonly networkPlayers = new Map<string, NetworkPlayerVisual>();
     private readonly knownCreatureAliveById = new Map<string, boolean>();
@@ -119,8 +146,16 @@ export class Game extends Scene {
         void this.initializeGameSession();
     }
 
+    preload(): void {
+        preloadMedievalSpriteSheets(this);
+    }
+
     update(): void {
         if (!this.isGameReady || !this.canMove) {
+            return;
+        }
+
+        if (this.isChatInputFocused()) {
             return;
         }
 
@@ -259,10 +294,18 @@ export class Game extends Scene {
         }
 
         keyboard.on('keydown-SPACE', () => {
+            if (this.isChatInputFocused()) {
+                return;
+            }
+
             this.tryAttack();
         });
 
         keyboard.on('keydown-ESC', () => {
+            if (this.isChatInputFocused()) {
+                return;
+            }
+
             this.deselectCreature();
         });
 
@@ -620,6 +663,10 @@ export class Game extends Scene {
             room.onError((code, message) => {
                 this.uiScene.logMessage(`Error de red (${code}): ${message}`);
             });
+
+            room.onMessage(SERVER_TO_CLIENT_MESSAGE.CHAT_MESSAGE, (message: unknown) => {
+                this.handleChatMessage(message);
+            });
         } catch (error: unknown) {
             const message = error instanceof Error ? error.message : 'Unknown error';
 
@@ -651,6 +698,135 @@ export class Game extends Scene {
         }
     }
 
+    private handleChatMessage(message: unknown): void {
+        if (!isChatMessagePayload(message)) {
+            return;
+        }
+
+        if (message.channel === 'private' && message.target) {
+            this.uiScene.logChatMessage(`[PM] ${message.from} -> ${message.target}: ${message.text}`);
+            return;
+        }
+
+        if (message.channel === 'world') {
+            this.uiScene.logChatMessage(`[Mundo] ${message.from}: ${message.text}`);
+            return;
+        }
+
+        if (message.channel === 'system') {
+            this.uiScene.logChatMessage(`[Sistema] ${message.text}`);
+            return;
+        }
+
+        this.uiScene.logChatMessage(`[Local] ${message.from}: ${message.text}`);
+    }
+
+    private createChatInputOverlay(): void {
+        const wrapper = document.createElement('div');
+        wrapper.style.position = 'fixed';
+        wrapper.style.left = '50%';
+        wrapper.style.bottom = '12px';
+        wrapper.style.transform = 'translateX(-50%)';
+        wrapper.style.zIndex = '9998';
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.placeholder = 'Chat: local por defecto. Comandos: /help /w /pm /announce';
+        input.maxLength = 180;
+        input.style.width = 'min(780px, 92vw)';
+        input.style.padding = '10px 12px';
+        input.style.borderRadius = '8px';
+        input.style.border = '1px solid #334155';
+        input.style.background = 'rgba(8, 18, 35, 0.92)';
+        input.style.color = '#f8fafc';
+        input.style.fontFamily = 'Georgia, serif';
+        input.style.fontSize = '14px';
+        input.style.display = 'none';
+
+        input.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                input.value = '';
+                input.blur();
+                input.style.display = 'none';
+                return;
+            }
+
+            if (event.key !== 'Enter') {
+                return;
+            }
+
+            event.preventDefault();
+            event.stopPropagation();
+
+            const text = input.value.trim();
+
+            if (text.length === 0) {
+                input.blur();
+                input.style.display = 'none';
+                return;
+            }
+
+            this.sendChatMessage(text);
+            input.value = '';
+            input.blur();
+            input.style.display = 'none';
+        });
+
+        wrapper.appendChild(input);
+        document.body.appendChild(wrapper);
+
+        this.chatInputElement = input;
+
+        const keyboard = this.input.keyboard;
+
+        if (!keyboard) {
+            return;
+        }
+
+        keyboard.on('keydown-ENTER', () => {
+            if (!this.chatInputElement) {
+                return;
+            }
+
+            if (this.isChatInputFocused()) {
+                return;
+            }
+
+            if (this.chatInputElement.style.display === 'none') {
+                this.chatInputElement.style.display = 'block';
+                this.chatInputElement.focus();
+                return;
+            }
+
+            this.chatInputElement.blur();
+            this.chatInputElement.style.display = 'none';
+        });
+    }
+
+    private sendChatMessage(text: string): void {
+        if (this.worldRoom === null) {
+            this.uiScene.logChatMessage('[Sistema] No hay conexion con la room.');
+            return;
+        }
+
+        const payload: ChatSendInput = { text };
+
+        if (!isChatSendInput(payload)) {
+            return;
+        }
+
+        this.worldRoom.send(CLIENT_TO_SERVER_MESSAGE.CHAT_SEND, payload);
+    }
+
+    private isChatInputFocused(): boolean {
+        if (!this.chatInputElement) {
+            return false;
+        }
+
+        return document.activeElement === this.chatInputElement;
+    }
+
     private resolveServerEndpoint(): string {
         const configuredUrl = import.meta.env.VITE_SERVER_URL;
 
@@ -667,6 +843,10 @@ export class Game extends Scene {
         client: ColyseusClient,
         endpoint: string
     ): Promise<Room<WorldRoomState>> {
+        if (this.authToken === null || this.localCharacterId === null) {
+            throw new Error('Missing auth token.');
+        }
+
         const normalizedEndpoint = endpoint.endsWith('/')
             ? endpoint.slice(0, -1)
             : endpoint;
@@ -680,7 +860,8 @@ export class Game extends Scene {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                name: this.localPlayerName
+                authToken: this.authToken,
+                characterId: this.localCharacterId
             })
         }
         );
@@ -859,8 +1040,46 @@ export class Game extends Scene {
         }
 
         const position = tileToWorldPosition(playerState.tileX, playerState.tileY, TILE_SIZE);
+        const hadKnownTile =
+            Number.isFinite(visual.tileX) &&
+            Number.isFinite(visual.tileY);
 
-        if (visual.tileX !== playerState.tileX || visual.tileY !== playerState.tileY) {
+        const moved =
+            visual.tileX !== playerState.tileX ||
+            visual.tileY !== playerState.tileY;
+
+        if (!hadKnownTile) {
+            visual.tileX = playerState.tileX;
+            visual.tileY = playerState.tileY;
+            visual.container.setPosition(position.x, position.y);
+            visual.nameLabel.setText(playerState.name);
+            const idleTexture = getMedievalPlayerTexture(
+                this,
+                visual.facingDirection,
+                false
+            );
+
+            visual.body.setTexture(idleTexture.textureKey, idleTexture.frame);
+            return;
+        }
+
+        if (moved) {
+            visual.facingDirection = this.resolveFacingDirection(
+                visual.tileX,
+                visual.tileY,
+                playerState.tileX,
+                playerState.tileY,
+                visual.facingDirection
+            );
+
+            const walkTexture = getMedievalPlayerTexture(
+                this,
+                visual.facingDirection,
+                true
+            );
+
+            visual.body.setTexture(walkTexture.textureKey, walkTexture.frame);
+
             this.tweens.killTweensOf(visual.container);
 
             this.tweens.add({
@@ -868,13 +1087,29 @@ export class Game extends Scene {
                 x: position.x,
                 y: position.y,
                 duration: this.movementDurationMs,
-                ease: 'Linear'
+                ease: 'Linear',
+                onComplete: () => {
+                    const idleTexture = getMedievalPlayerTexture(
+                        this,
+                        visual.facingDirection,
+                        false
+                    );
+
+                    visual.body.setTexture(idleTexture.textureKey, idleTexture.frame);
+                }
             });
+        } else {
+            const idleTexture = getMedievalPlayerTexture(
+                this,
+                visual.facingDirection,
+                false
+            );
+
+            visual.body.setTexture(idleTexture.textureKey, idleTexture.frame);
         }
 
         visual.tileX = playerState.tileX;
         visual.tileY = playerState.tileY;
-        visual.body.setFillStyle(isLocalPlayer ? 0x22d3ee : 0xf97316);
         visual.nameLabel.setText(playerState.name);
     }
 
@@ -897,7 +1132,11 @@ export class Game extends Scene {
     }
 
     private async initializeGameSession(): Promise<void> {
-        this.localPlayerName = await this.askPlayerName();
+        const authSession = await this.askAuthSession();
+
+        this.localPlayerName = authSession.playerName;
+        this.localCharacterId = authSession.characterId;
+        this.authToken = authSession.token;
 
         this.createSystems();
         this.createWorld();
@@ -906,8 +1145,11 @@ export class Game extends Scene {
         this.createCombatControls();
         this.configureCamera();
         this.launchUiScene();
+        this.createChatInputOverlay();
 
         this.events.once('shutdown', () => {
+            this.chatInputElement?.parentElement?.remove();
+            this.chatInputElement = null;
             void this.leaveWorldRoom();
         });
 
@@ -916,9 +1158,7 @@ export class Game extends Scene {
         void this.connectToWorldRoom();
     }
 
-    private askPlayerName(): Promise<string> {
-        const fallbackName = `Player-${Math.random().toString(36).slice(2, 6)}`;
-
+    private async askAuthSession(): Promise<AuthSessionResult> {
         return new Promise((resolve) => {
             const root = document.createElement('div');
             root.style.position = 'fixed';
@@ -938,34 +1178,99 @@ export class Game extends Scene {
             card.style.boxShadow = '0 20px 50px rgba(0, 0, 0, 0.45)';
 
             const title = document.createElement('h2');
-            title.textContent = 'Elige tu nombre';
+            title.textContent = 'Acceso al Reino';
             title.style.margin = '0 0 8px';
             title.style.color = '#f8fafc';
             title.style.fontFamily = 'Arial, sans-serif';
             title.style.fontSize = '22px';
 
             const subtitle = document.createElement('p');
-            subtitle.textContent = 'Ingresa tu nombre antes de unirte al mundo.';
+            subtitle.textContent = 'Registra tu cuenta con personaje o inicia sesión para elegir uno.';
             subtitle.style.margin = '0 0 16px';
             subtitle.style.color = '#cbd5e1';
             subtitle.style.fontFamily = 'Arial, sans-serif';
             subtitle.style.fontSize = '14px';
 
-            const input = document.createElement('input');
-            input.type = 'text';
-            input.maxLength = 20;
-            input.value = fallbackName;
-            input.style.width = '100%';
-            input.style.padding = '10px 12px';
-            input.style.borderRadius = '8px';
-            input.style.border = '1px solid #475569';
-            input.style.background = '#0f172a';
-            input.style.color = '#f8fafc';
-            input.style.fontSize = '14px';
-            input.style.fontFamily = 'Arial, sans-serif';
+            let mode: AuthMode = 'login';
+            let loginResponse: AuthLoginResponse | null = null;
+
+            const createInput = (
+                placeholder: string,
+                value = '',
+                type = 'text'
+            ): HTMLInputElement => {
+                const input = document.createElement('input');
+                input.type = type;
+                input.placeholder = placeholder;
+                input.value = value;
+                input.style.width = '100%';
+                input.style.padding = '10px 12px';
+                input.style.borderRadius = '8px';
+                input.style.border = '1px solid #475569';
+                input.style.background = '#0f172a';
+                input.style.color = '#f8fafc';
+                input.style.fontSize = '14px';
+                input.style.fontFamily = 'Arial, sans-serif';
+                input.style.marginBottom = '10px';
+                return input;
+            };
+
+            const modeToggle = document.createElement('button');
+            modeToggle.type = 'button';
+            modeToggle.textContent = 'Cambiar a registro';
+            modeToggle.style.marginBottom = '10px';
+            modeToggle.style.width = '100%';
+            modeToggle.style.padding = '8px 12px';
+            modeToggle.style.border = '1px solid #475569';
+            modeToggle.style.borderRadius = '8px';
+            modeToggle.style.background = '#1e293b';
+            modeToggle.style.color = '#e2e8f0';
+            modeToggle.style.cursor = 'pointer';
+
+            const usernameInput = createInput('Usuario (a-z, 0-9, _)', '');
+            const passwordInput = createInput('Contraseña', '', 'password');
+            const characterNameInput = createInput('Nombre de personaje', '');
+
+            const characterSelect = document.createElement('select');
+            characterSelect.style.width = '100%';
+            characterSelect.style.padding = '10px 12px';
+            characterSelect.style.borderRadius = '8px';
+            characterSelect.style.border = '1px solid #475569';
+            characterSelect.style.background = '#0f172a';
+            characterSelect.style.color = '#f8fafc';
+            characterSelect.style.fontSize = '14px';
+            characterSelect.style.fontFamily = 'Arial, sans-serif';
+            characterSelect.style.marginBottom = '10px';
+            characterSelect.style.display = 'none';
+
+            const createExtraCharacterInput = createInput(
+                'Nuevo personaje para esta cuenta',
+                ''
+            );
+            createExtraCharacterInput.style.display = 'none';
+
+            const createExtraCharacterButton = document.createElement('button');
+            createExtraCharacterButton.type = 'button';
+            createExtraCharacterButton.textContent = 'Crear personaje';
+            createExtraCharacterButton.style.width = '100%';
+            createExtraCharacterButton.style.padding = '8px 12px';
+            createExtraCharacterButton.style.border = '1px solid #475569';
+            createExtraCharacterButton.style.borderRadius = '8px';
+            createExtraCharacterButton.style.background = '#1e293b';
+            createExtraCharacterButton.style.color = '#e2e8f0';
+            createExtraCharacterButton.style.cursor = 'pointer';
+            createExtraCharacterButton.style.marginBottom = '10px';
+            createExtraCharacterButton.style.display = 'none';
+
+            const status = document.createElement('p');
+            status.style.margin = '0 0 10px';
+            status.style.color = '#fda4af';
+            status.style.fontFamily = 'Arial, sans-serif';
+            status.style.fontSize = '13px';
+            status.style.minHeight = '18px';
 
             const button = document.createElement('button');
-            button.textContent = 'Entrar';
+            button.textContent = 'Iniciar sesión';
             button.style.marginTop = '14px';
             button.style.width = '100%';
             button.style.padding = '10px 12px';
@@ -976,42 +1281,552 @@ export class Game extends Scene {
             button.style.fontWeight = '700';
             button.style.cursor = 'pointer';
 
-            const submit = (): void => {
-                const chosenName = input.value.trim().slice(0, 20);
-                const finalName = chosenName.length > 0 ? chosenName : fallbackName;
-
-                root.remove();
-                resolve(finalName);
+            const refreshModeUi = (): void => {
+                if (mode === 'login') {
+                    button.textContent = loginResponse ? 'Entrar al mundo' : 'Iniciar sesión';
+                    modeToggle.textContent = 'Cambiar a registro';
+                    characterNameInput.style.display = 'none';
+                    characterSelect.style.display = loginResponse ? 'block' : 'none';
+                    createExtraCharacterInput.style.display =
+                        loginResponse ? 'block' : 'none';
+                    createExtraCharacterButton.style.display =
+                        loginResponse ? 'block' : 'none';
+                } else {
+                    button.textContent = 'Crear cuenta';
+                    modeToggle.textContent = 'Cambiar a login';
+                    characterNameInput.style.display = 'block';
+                    characterSelect.style.display = 'none';
+                    createExtraCharacterInput.style.display = 'none';
+                    createExtraCharacterButton.style.display = 'none';
+                }
             };
 
-            button.addEventListener('click', submit);
+            const clearLoginSelection = (): void => {
+                loginResponse = null;
+                characterSelect.innerHTML = '';
+                refreshModeUi();
+            };
 
-            input.addEventListener('keydown', (event) => {
+            const renderCharacters = (characters: readonly CharacterSummary[]): void => {
+                characterSelect.innerHTML = '';
+
+                for (const character of characters) {
+                    const option = document.createElement('option');
+                    option.value = character.id;
+                    option.textContent = character.name;
+                    characterSelect.appendChild(option);
+                }
+
+                if (characterSelect.options.length > 0) {
+                    characterSelect.selectedIndex = 0;
+                }
+            };
+
+            const createCharacterFromLoginState = async (): Promise<void> => {
+                if (loginResponse === null) {
+                    return;
+                }
+
+                const characterName = createExtraCharacterInput.value
+                    .trim()
+                    .slice(0, 20);
+
+                if (!characterName) {
+                    status.style.color = '#fda4af';
+                    status.textContent = 'Ingresa un nombre para el nuevo personaje.';
+                    return;
+                }
+
+                createExtraCharacterButton.disabled = true;
+                button.disabled = true;
+                modeToggle.disabled = true;
+                usernameInput.disabled = true;
+                passwordInput.disabled = true;
+                characterSelect.disabled = true;
+                createExtraCharacterInput.disabled = true;
+                status.style.color = '#cbd5e1';
+                status.textContent = 'Creando personaje...';
+
+                try {
+                    const createdCharacter = await this.requestCreateCharacter(
+                        loginResponse.token,
+                        characterName
+                    );
+
+                    const refreshed = await this.requestCharacters(loginResponse.token);
+
+                    loginResponse = {
+                        ...loginResponse,
+                        characters: refreshed
+                    };
+
+                    renderCharacters(loginResponse.characters);
+                    characterSelect.value = createdCharacter.id;
+                    createExtraCharacterInput.value = '';
+                    status.style.color = '#86efac';
+                    status.textContent = `Personaje ${createdCharacter.name} creado.`;
+                } catch (error: unknown) {
+                    const message =
+                        error instanceof Error
+                            ? error.message
+                            : 'No se pudo crear el personaje.';
+
+                    status.style.color = '#fda4af';
+                    status.textContent = message;
+                } finally {
+                    createExtraCharacterButton.disabled = false;
+                    button.disabled = false;
+                    modeToggle.disabled = false;
+                    usernameInput.disabled = false;
+                    passwordInput.disabled = false;
+                    characterSelect.disabled = false;
+                    createExtraCharacterInput.disabled = false;
+                }
+            };
+
+            const submit = async (): Promise<void> => {
+                const username = usernameInput.value.trim();
+                const password = passwordInput.value;
+
+                if (!username || !password) {
+                    status.textContent = 'Usuario y contraseña son obligatorios.';
+                    return;
+                }
+
+                if (mode === 'register') {
+                    const characterName = characterNameInput.value.trim().slice(0, 20);
+
+                    if (!characterName) {
+                        status.textContent = 'El nombre de personaje es obligatorio para registrar.';
+                        return;
+                    }
+                }
+
+                button.disabled = true;
+                modeToggle.disabled = true;
+                usernameInput.disabled = true;
+                passwordInput.disabled = true;
+                characterNameInput.disabled = true;
+                characterSelect.disabled = true;
+                status.style.color = '#cbd5e1';
+                status.textContent = 'Validando...';
+
+                try {
+                    if (mode === 'register') {
+                        const characterName = characterNameInput.value.trim().slice(0, 20);
+
+                        await this.requestRegister(username, password, characterName);
+
+                        mode = 'login';
+                        clearLoginSelection();
+                        status.style.color = '#86efac';
+                        status.textContent = 'Cuenta creada. Ahora inicia sesión para elegir personaje.';
+                    } else if (loginResponse === null) {
+                        const response = await this.requestLogin(username, password);
+
+                        if (response.characters.length === 0) {
+                            throw new Error('Esta cuenta no tiene personajes.');
+                        }
+
+                        loginResponse = response;
+                        renderCharacters(response.characters);
+                        status.style.color = '#93c5fd';
+                        status.textContent = 'Elige un personaje del listado y pulsa Entrar al mundo.';
+                        refreshModeUi();
+                    } else {
+                        const selectedId = characterSelect.value;
+                        const selectedCharacter = loginResponse.characters.find(
+                            (character) => character.id === selectedId
+                        );
+
+                        if (!selectedCharacter) {
+                            throw new Error('Selecciona un personaje válido.');
+                        }
+
+                        root.remove();
+                        resolve({
+                            playerName: selectedCharacter.name,
+                            characterId: selectedCharacter.id,
+                            token: loginResponse.token
+                        });
+                    }
+                } catch (error: unknown) {
+                    const message =
+                        error instanceof Error
+                            ? error.message
+                            : 'Error de autenticación.';
+
+                    status.style.color = '#fda4af';
+                    status.textContent = message;
+                } finally {
+                    button.disabled = false;
+                    modeToggle.disabled = false;
+                    usernameInput.disabled = false;
+                    passwordInput.disabled = false;
+                    characterNameInput.disabled = false;
+                    characterSelect.disabled = false;
+                }
+            };
+
+            modeToggle.addEventListener('click', () => {
+                mode = mode === 'login' ? 'register' : 'login';
+                status.textContent = '';
+                clearLoginSelection();
+                refreshModeUi();
+            });
+
+            createExtraCharacterButton.addEventListener('click', () => {
+                void createCharacterFromLoginState();
+            });
+
+            usernameInput.addEventListener('input', () => {
+                if (mode === 'login') {
+                    clearLoginSelection();
+                }
+            });
+
+            passwordInput.addEventListener('input', () => {
+                if (mode === 'login') {
+                    clearLoginSelection();
+                }
+            });
+
+            createExtraCharacterInput.addEventListener('keydown', (event) => {
                 if (event.key !== 'Enter') {
                     return;
                 }
 
                 event.preventDefault();
-                submit();
+                void createCharacterFromLoginState();
+            });
+
+            button.addEventListener('click', () => {
+                void submit();
+            });
+
+            usernameInput.addEventListener('keydown', (event) => {
+                if (event.key !== 'Enter') {
+                    return;
+                }
+
+                event.preventDefault();
+                void submit();
+            });
+
+            passwordInput.addEventListener('keydown', (event) => {
+                if (event.key !== 'Enter') {
+                    return;
+                }
+
+                event.preventDefault();
+                void submit();
+            });
+
+            characterNameInput.addEventListener('keydown', (event) => {
+                if (event.key !== 'Enter') {
+                    return;
+                }
+
+                event.preventDefault();
+                void submit();
             });
 
             card.appendChild(title);
             card.appendChild(subtitle);
-            card.appendChild(input);
+            card.appendChild(modeToggle);
+            card.appendChild(usernameInput);
+            card.appendChild(passwordInput);
+            card.appendChild(characterNameInput);
+            card.appendChild(characterSelect);
+            card.appendChild(createExtraCharacterInput);
+            card.appendChild(createExtraCharacterButton);
+            card.appendChild(status);
             card.appendChild(button);
 
             root.appendChild(card);
             document.body.appendChild(root);
 
-            input.focus();
-            input.select();
+            refreshModeUi();
+            usernameInput.focus();
         });
     }
 
+    private resolveAuthEndpoint(): string {
+        const configuredUrl = import.meta.env.VITE_AUTH_URL;
+
+        if (typeof configuredUrl === 'string' && configuredUrl.trim().length > 0) {
+            return configuredUrl;
+        }
+
+        const protocol = window.location.protocol === 'https:' ? 'https' : 'http';
+
+        return `${protocol}://${window.location.hostname}:3567`;
+    }
+
+    private async requestLogin(
+        username: string,
+        password: string
+    ): Promise<AuthLoginResponse> {
+        const endpoint = this.resolveAuthEndpoint();
+        const normalizedEndpoint = endpoint.endsWith('/')
+            ? endpoint.slice(0, -1)
+            : endpoint;
+
+        const response = await fetch(`${normalizedEndpoint}/auth/login`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json'
+            },
+            body: JSON.stringify({ username, password })
+        });
+
+        const payload: unknown = await response.json().catch(() => null);
+
+        if (!response.ok) {
+            const message =
+                this.isRecord(payload) && typeof payload.error === 'string'
+                    ? payload.error
+                    : `Auth failed (${response.status}).`;
+
+            throw new Error(message);
+        }
+
+        if (!this.isRecord(payload)) {
+            throw new Error('Invalid login response.');
+        }
+
+        const { accountId, token, username: usernameFromServer, characters } = payload;
+
+        if (
+            typeof accountId !== 'string' ||
+            typeof token !== 'string' ||
+            typeof usernameFromServer !== 'string' ||
+            !Array.isArray(characters)
+        ) {
+            throw new Error('Invalid login response payload.');
+        }
+
+        const parsedCharacters: CharacterSummary[] = [];
+
+        for (const entry of characters) {
+            if (!this.isRecord(entry)) {
+                continue;
+            }
+
+            const id = entry.id;
+            const name = entry.name;
+
+            if (typeof id === 'string' && typeof name === 'string') {
+                parsedCharacters.push({ id, name });
+            }
+        }
+
+        return {
+            accountId,
+            token,
+            username: usernameFromServer,
+            characters: parsedCharacters
+        };
+    }
+
+    private async requestRegister(
+        username: string,
+        password: string,
+        characterName: string
+    ): Promise<AuthRegisterResponse> {
+        const endpoint = this.resolveAuthEndpoint();
+        const normalizedEndpoint = endpoint.endsWith('/')
+            ? endpoint.slice(0, -1)
+            : endpoint;
+
+        const response = await fetch(`${normalizedEndpoint}/auth/register`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json'
+            },
+            body: JSON.stringify({ username, password, characterName })
+        });
+
+        const payload: unknown = await response.json().catch(() => null);
+
+        if (!response.ok) {
+            const message =
+                this.isRecord(payload) && typeof payload.error === 'string'
+                    ? payload.error
+                    : `Auth failed (${response.status}).`;
+
+            throw new Error(message);
+        }
+
+        if (!this.isRecord(payload)) {
+            throw new Error('Invalid register response.');
+        }
+
+        const { accountId, token, createdCharacter } = payload;
+
+        if (
+            typeof accountId !== 'string' ||
+            typeof token !== 'string' ||
+            !this.isRecord(createdCharacter)
+        ) {
+            throw new Error('Invalid register response payload.');
+        }
+
+        const usernameFromServer = payload.username;
+
+        if (typeof usernameFromServer !== 'string') {
+            throw new Error('Invalid register response username.');
+        }
+
+        const createdCharacterId = createdCharacter.id;
+        const createdCharacterName = createdCharacter.name;
+
+        if (
+            typeof createdCharacterId !== 'string' ||
+            typeof createdCharacterName !== 'string'
+        ) {
+            throw new Error('Invalid created character payload.');
+        }
+
+        return {
+            accountId,
+            token,
+            username: usernameFromServer,
+            createdCharacter: {
+                id: createdCharacterId,
+                name: createdCharacterName
+            }
+        };
+    }
+
+    private async requestCreateCharacter(
+        authToken: string,
+        characterName: string
+    ): Promise<CharacterSummary> {
+        const endpoint = this.resolveAuthEndpoint();
+        const normalizedEndpoint = endpoint.endsWith('/')
+            ? endpoint.slice(0, -1)
+            : endpoint;
+
+        const response = await fetch(`${normalizedEndpoint}/characters/create`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json'
+            },
+            body: JSON.stringify({ authToken, characterName })
+        });
+
+        const payload: unknown = await response.json().catch(() => null);
+
+        if (!response.ok) {
+            const message =
+                this.isRecord(payload) && typeof payload.error === 'string'
+                    ? payload.error
+                    : `Create character failed (${response.status}).`;
+
+            throw new Error(message);
+        }
+
+        if (!this.isRecord(payload)) {
+            throw new Error('Invalid create character response.');
+        }
+
+        const { character } = payload;
+
+        if (!this.isRecord(character)) {
+            throw new Error('Invalid character payload.');
+        }
+
+        const characterId = character.id;
+        const characterNameFromPayload = character.name;
+
+        if (
+            typeof characterId !== 'string' ||
+            typeof characterNameFromPayload !== 'string'
+        ) {
+            throw new Error('Invalid created character shape.');
+        }
+
+        const result: AuthCreateCharacterResponse = {
+            character: {
+                id: characterId,
+                name: characterNameFromPayload
+            }
+        };
+
+        return result.character;
+    }
+
+    private async requestCharacters(
+        authToken: string
+    ): Promise<CharacterSummary[]> {
+        const endpoint = this.resolveAuthEndpoint();
+        const normalizedEndpoint = endpoint.endsWith('/')
+            ? endpoint.slice(0, -1)
+            : endpoint;
+
+        const encodedToken = encodeURIComponent(authToken);
+        const response = await fetch(
+            `${normalizedEndpoint}/characters?token=${encodedToken}`,
+            {
+                method: 'GET',
+                headers: {
+                    Accept: 'application/json'
+                }
+            }
+        );
+
+        const payload: unknown = await response.json().catch(() => null);
+
+        if (!response.ok) {
+            const message =
+                this.isRecord(payload) && typeof payload.error === 'string'
+                    ? payload.error
+                    : `List characters failed (${response.status}).`;
+
+            throw new Error(message);
+        }
+
+        if (!this.isRecord(payload) || !Array.isArray(payload.characters)) {
+            throw new Error('Invalid character list response.');
+        }
+
+        const responseBody: AuthCharactersResponse = {
+            characters: []
+        };
+
+        for (const entry of payload.characters) {
+            if (!this.isRecord(entry)) {
+                continue;
+            }
+
+            const id = entry.id;
+            const name = entry.name;
+
+            if (typeof id === 'string' && typeof name === 'string') {
+                responseBody.characters.push({ id, name });
+            }
+        }
+
+        return responseBody.characters;
+    }
+
     private createNetworkPlayerVisual(isLocalPlayer: boolean): NetworkPlayerVisual {
+        ensureMedievalSpriteTextures(this);
+
         const body = this.add
-            .rectangle(0, 0, TILE_SIZE - 10, TILE_SIZE - 10, isLocalPlayer ? 0x22d3ee : 0xf97316)
-            .setStrokeStyle(2, 0x111111);
+            .image(0, 1, getMedievalPlayerTexture(this, 'down', false).textureKey)
+            .setDisplaySize(TILE_SIZE - 4, TILE_SIZE - 4);
+
+        const initialTexture = getMedievalPlayerTexture(this, 'down', false);
+        body.setTexture(initialTexture.textureKey, initialTexture.frame);
+
+        if (!isLocalPlayer) {
+            body.setTint(0xfff1d4);
+        }
 
         const nameLabel = this.add
             .text(0, -24, '', {
@@ -1032,8 +1847,38 @@ export class Game extends Scene {
             body,
             nameLabel,
             tileX: Number.NaN,
-            tileY: Number.NaN
+            tileY: Number.NaN,
+            facingDirection: 'down'
         };
+    }
+
+    private resolveFacingDirection(
+        fromTileX: number,
+        fromTileY: number,
+        toTileX: number,
+        toTileY: number,
+        fallback: Direction
+    ): Direction {
+        const deltaX = toTileX - fromTileX;
+        const deltaY = toTileY - fromTileY;
+
+        if (deltaX < 0) {
+            return 'left';
+        }
+
+        if (deltaX > 0) {
+            return 'right';
+        }
+
+        if (deltaY < 0) {
+            return 'up';
+        }
+
+        if (deltaY > 0) {
+            return 'down';
+        }
+
+        return fallback;
     }
 
     private clearNetworkPlayers(): void {
