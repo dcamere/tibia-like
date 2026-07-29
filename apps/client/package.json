@@ -19,6 +19,7 @@
     "build": "node log.js build & vite build --config vite/config.prod.mjs",
     "dev-nolog": "vite --config vite/config.dev.mjs",
     "local": "vite --config vite/config.dev.mjs",
+    "preview-railway": "vite preview --config vite/config.prod.mjs --host 0.0.0.0 --port $PORT",
     "build-nolog": "vite build --config vite/config.prod.mjs",
     "typecheck": "tsc --noEmit"
   },
