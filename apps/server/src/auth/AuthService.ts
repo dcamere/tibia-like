@@ -9,6 +9,7 @@ import {
 } from '@prisma/client';
 
 import type { CharacterSummary } from '@tibia-like/shared';
+import { STARTER_CITY_DEFAULT_SPAWN } from '@tibia-like/shared';
 
 import { prisma } from '../db';
 
@@ -199,8 +200,8 @@ export const registerAccount = async (
             data: {
                 accountId: account.id,
                 name: characterName,
-                tileX: 5,
-                tileY: 5,
+                tileX: STARTER_CITY_DEFAULT_SPAWN.tileX,
+                tileY: STARTER_CITY_DEFAULT_SPAWN.tileY,
                 level: 1,
                 experience: 0,
                 goldCopper: 0
@@ -335,8 +336,8 @@ export const createCharacterFromSessionToken = async (
         data: {
             accountId: session.accountId,
             name: characterName,
-            tileX: 5,
-            tileY: 5,
+            tileX: STARTER_CITY_DEFAULT_SPAWN.tileX,
+            tileY: STARTER_CITY_DEFAULT_SPAWN.tileY,
             level: 1,
             experience: 0,
             goldCopper: 0

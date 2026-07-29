@@ -14,6 +14,8 @@ import {
     MAP_HEIGHT_IN_TILES,
     MAP_WIDTH_IN_TILES,
     SERVER_TO_CLIENT_MESSAGE,
+    STARTER_CITY_DEFAULT_SPAWN,
+    STARTER_CITY_SPAWN_TILES,
     WORLD_ROOM_NAME,
     type AnnouncementPayload,
     type ChatMessagePayload,
@@ -66,19 +68,9 @@ type CreatureSpawnDefinition = {
     spawnTile: TilePosition;
 };
 
-const SPAWN_TILES: readonly TilePosition[] = [
-    { tileX: 5, tileY: 5 },
-    { tileX: 7, tileY: 5 },
-    { tileX: 5, tileY: 7 },
-    { tileX: 7, tileY: 7 },
-    { tileX: 9, tileY: 5 },
-    { tileX: 9, tileY: 7 }
-];
+const SPAWN_TILES: readonly TilePosition[] = STARTER_CITY_SPAWN_TILES;
 
-const DEFAULT_SPAWN_TILE: TilePosition = {
-    tileX: 5,
-    tileY: 5
-};
+const DEFAULT_SPAWN_TILE: TilePosition = STARTER_CITY_DEFAULT_SPAWN;
 
 const CREATURE_MOVE_INTERVAL_MS = 700;
 const CREATURE_RESPAWN_DELAY_MS = 5000;
@@ -99,21 +91,21 @@ const CREATURE_SPAWNS: readonly CreatureSpawnDefinition[] = [
         type: 'rat',
         name: 'Rat',
         maxHealth: 30,
-        spawnTile: { tileX: 11, tileY: 11 }
+        spawnTile: { tileX: 44, tileY: 44 }
     },
     {
         id: 'creature-rat-2',
         type: 'rat',
         name: 'Rat',
         maxHealth: 30,
-        spawnTile: { tileX: 16, tileY: 3 }
+        spawnTile: { tileX: 55, tileY: 28 }
     },
     {
         id: 'creature-rat-3',
         type: 'rat',
         name: 'Rat',
         maxHealth: 30,
-        spawnTile: { tileX: 4, tileY: 12 }
+        spawnTile: { tileX: 30, tileY: 52 }
     }
 ];
 

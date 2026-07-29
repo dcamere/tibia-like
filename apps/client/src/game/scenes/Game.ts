@@ -38,6 +38,7 @@ import { tileToWorldPosition } from '../world/coordinates';
 import {
     MAP_HEIGHT_IN_TILES,
     MAP_WIDTH_IN_TILES,
+    STARTER_CITY_DEFAULT_SPAWN,
     TILE_SIZE,
     TileType,
     WORLD_HEIGHT,
@@ -243,7 +244,10 @@ export class Game extends Scene {
             )
             .setStrokeStyle(4, 0x111111);
 
-        this.updateVisibleWorldChunks(5, 5);
+        this.updateVisibleWorldChunks(
+            STARTER_CITY_DEFAULT_SPAWN.tileX,
+            STARTER_CITY_DEFAULT_SPAWN.tileY
+        );
     }
 
     private updateVisibleWorldChunks(centerTileX: number, centerTileY: number): void {
@@ -398,7 +402,13 @@ export class Game extends Scene {
 
     private createGroundTile(tileX: number, tileY: number): GameObjects.Rectangle {
         const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
+        const tileType = WORLD_MAP[tileY][tileX];
         const alternate = (tileX + tileY) % 2 === 0;
+        let fillColor = alternate ? 0x3f6946 : 0x426f49;
+
+        if (tileType === TileType.Road) {
+            fillColor = alternate ? 0x8c7a62 : 0x97846b;
+        }
 
         return this.add
             .rectangle(
@@ -406,7 +416,7 @@ export class Game extends Scene {
                 position.y,
                 TILE_SIZE,
                 TILE_SIZE,
-                alternate ? 0x3f6946 : 0x426f49
+                fillColor
             )
             .setStrokeStyle(1, 0x29472f, 0.45);
     }
@@ -427,6 +437,9 @@ export class Game extends Scene {
                 return this.createRock(tileX, tileY);
 
             case TileType.Grass:
+                return null;
+
+            case TileType.Road:
                 return null;
 
             default:
@@ -474,8 +487,8 @@ export class Game extends Scene {
     }
 
     private createPlayer(name: string): void {
-        const initialTileX = 5;
-        const initialTileY = 5;
+        const initialTileX = STARTER_CITY_DEFAULT_SPAWN.tileX;
+        const initialTileY = STARTER_CITY_DEFAULT_SPAWN.tileY;
 
         if (!this.collisionSystem.isWalkable(initialTileX, initialTileY)) {
             throw new Error('The initial player position is invalid.');
