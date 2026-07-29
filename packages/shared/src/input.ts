@@ -27,7 +27,7 @@ export const isMoveInput = (value: unknown): value is MoveInput => {
  * outcome, only the player's intent.
  */
 export type AttackInput = {
-    targetId: EntityId;
+    creatureId: EntityId;
 };
 
 export const isAttackInput = (value: unknown): value is AttackInput => {
@@ -35,5 +35,5 @@ export const isAttackInput = (value: unknown): value is AttackInput => {
         return false;
     }
 
-    return typeof value.targetId === 'string';
+    return typeof value.creatureId === 'string';
 };

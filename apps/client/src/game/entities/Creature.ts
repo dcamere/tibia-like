@@ -289,6 +289,11 @@ export class Creature {
         return { x: this.container.x, y: this.container.y };
     }
 
+    public destroy(): void {
+        this.container.destroy();
+        this.onClickHandler = null;
+    }
+
     private die(): void {
         this.isAlive = false;
         this.setSelected(false);

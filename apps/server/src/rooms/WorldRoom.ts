@@ -1,17 +1,23 @@
 import { Client, Room } from '@colyseus/core';
 
 import {
+    CLIENT_TO_SERVER_MESSAGE,
     DIRECTION_DELTAS,
+    DIRECTIONS,
     isAttackInput,
     isMoveInput,
     isWalkableTile,
+    MAP_HEIGHT_IN_TILES,
+    MAP_WIDTH_IN_TILES,
+    WORLD_ROOM_NAME,
+    type CreatureId,
+    type CreatureType,
     type TilePosition
 } from '@tibia-like/shared';
 
+import { CreatureState } from '../state/CreatureState';
 import { PlayerState } from '../state/PlayerState';
 import { WorldState } from '../state/WorldState';
-
-const WORLD_ROOM_NAME = 'world';
 
 const SPAWN_TILES: readonly TilePosition[] = [
     { tileX: 5, tileY: 5 },
@@ -34,98 +40,58 @@ const ATTACK_RANGE_IN_TILES = 1;
 const ATTACK_DAMAGE = 10;
 const ATTACK_COOLDOWN_MS = 500;
 
-const CREATURE_SPAWNS = [
+type CreatureSpawnDefinition = {
+    id: CreatureId;
+    type: CreatureType;
+    name: string;
+    maxHealth: number;
+    spawnTile: TilePosition;
+};
+
+const CREATURE_SPAWNS: readonly CreatureSpawnDefinition[] = [
     {
         id: 'creature-rat-1',
+        type: 'rat',
         name: 'Rat',
-        tileX: 11,
-        tileY: 11,
-        maxHealth: 30
+        maxHealth: 30,
+        spawnTile: { tileX: 11, tileY: 11 }
     },
     {
         id: 'creature-rat-2',
+        type: 'rat',
         name: 'Rat',
-        tileX: 16,
-        tileY: 3,
-        maxHealth: 30
+        maxHealth: 30,
+        spawnTile: { tileX: 16, tileY: 3 }
+    },
+    {
+        id: 'creature-rat-3',
+        type: 'rat',
+        name: 'Rat',
+        maxHealth: 30,
+        spawnTile: { tileX: 4, tileY: 12 }
     }
-] as const;
-
-const CREATURE_MOVE_DIRECTIONS: readonly TilePosition[] = [
-    { tileX: -1, tileY: 0 },
-    { tileX: 1, tileY: 0 },
-    { tileX: 0, tileY: -1 },
-    { tileX: 0, tileY: 1 }
 ];
-
-type CreatureDamagedMessage = {
-    creatureId: string;
-    damage: number;
-};
-
-type CreatureKilledMessage = {
-    creatureId: string;
-};
-
-type CreatureMovedMessage = {
-    creatureId: string;
-    tileX: number;
-    tileY: number;
-};
-
-type CreatureStateSnapshot = {
-    creatureId: string;
-    tileX: number;
-    tileY: number;
-    currentHealth: number;
-    isAlive: boolean;
-};
-
-type CreatureSnapshotMessage = {
-    creatures: CreatureStateSnapshot[];
-};
-
-type CreatureRespawnedMessage = {
-    creatureId: string;
-    tileX: number;
-    tileY: number;
-    currentHealth: number;
-};
-
-type ServerCreatureState = {
-    id: string;
-    name: string;
-    spawnTileX: number;
-    spawnTileY: number;
-    tileX: number;
-    tileY: number;
-    maxHealth: number;
-    currentHealth: number;
-    isAlive: boolean;
-};
 
 export { WORLD_ROOM_NAME };
 
-export class WorldRoom extends Room<WorldState> {
+export class WorldRoom extends Room {
+    declare state: WorldState;
+
     private nextSpawnIndex = 0;
-    private readonly creatures = new Map<string, ServerCreatureState>();
     private readonly lastMoveAtByPlayer = new Map<string, number>();
     private readonly lastAttackAtByPlayer = new Map<string, number>();
 
     onCreate(): void {
         this.setState(new WorldState());
-        this.initializeCreatures();
+        this.initializeRoomCreatures();
 
-        this.onMessage('player:move', (client, payload: unknown) => {
+        this.onMessage(CLIENT_TO_SERVER_MESSAGE.PLAYER_MOVE, (client, payload: unknown) => {
             this.handlePlayerMove(client, payload);
         });
 
-        this.onMessage(
-            'player:attack',
-            (client, payload: unknown) => {
-                this.handlePlayerAttack(client, payload);
-            }
-        );
+        this.onMessage(CLIENT_TO_SERVER_MESSAGE.PLAYER_ATTACK, (client, payload: unknown) => {
+            this.handlePlayerAttack(client, payload);
+        });
 
         this.setSimulationInterval(() => {
             this.tickCreatures();
@@ -145,11 +111,7 @@ export class WorldRoom extends Room<WorldState> {
 
         this.state.players.set(client.sessionId, player);
 
-        client.send('creature:snapshot', this.createCreatureSnapshot());
-
-        console.info(
-            `[WorldRoom] ${client.sessionId} joined as ${player.name}`
-        );
+        console.info(`[WorldRoom] ${client.sessionId} joined as ${player.name}`);
     }
 
     onLeave(client: Client): void {
@@ -168,10 +130,6 @@ export class WorldRoom extends Room<WorldState> {
         }
 
         const delta = DIRECTION_DELTAS[payload.direction];
-
-        if (!delta) {
-            return;
-        }
 
         const now = Date.now();
         const lastMoveAt = this.lastMoveAtByPlayer.get(client.sessionId) ?? 0;
@@ -204,7 +162,7 @@ export class WorldRoom extends Room<WorldState> {
             return;
         }
 
-        const target = this.creatures.get(payload.targetId);
+        const target = this.state.creatures.get(payload.creatureId);
 
         if (!target || !target.isAlive) {
             return;
@@ -230,16 +188,9 @@ export class WorldRoom extends Room<WorldState> {
 
         this.lastAttackAtByPlayer.set(client.sessionId, now);
 
-        target.currentHealth = Math.max(0, target.currentHealth - ATTACK_DAMAGE);
+        target.health = Math.max(0, target.health - ATTACK_DAMAGE);
 
-        const damagePayload: CreatureDamagedMessage = {
-            creatureId: target.id,
-            damage: ATTACK_DAMAGE
-        };
-
-        this.broadcast('creature:damaged', damagePayload);
-
-        if (target.currentHealth === 0) {
+        if (target.health === 0) {
             this.killCreature(target);
         }
     }
@@ -255,34 +206,45 @@ export class WorldRoom extends Room<WorldState> {
 
         const isSameTile = distanceX === 0 && distanceY === 0;
 
-        return (
-            !isSameTile &&
-            Math.max(distanceX, distanceY) <= ATTACK_RANGE_IN_TILES
-        );
+        return !isSameTile && Math.max(distanceX, distanceY) <= ATTACK_RANGE_IN_TILES;
     }
 
     private getNextSpawnTile(): TilePosition {
-        const tile =
-            SPAWN_TILES[this.nextSpawnIndex % SPAWN_TILES.length] ??
-            DEFAULT_SPAWN_TILE;
+        const spawnCount = SPAWN_TILES.length;
 
-        this.nextSpawnIndex += 1;
+        for (let offset = 0; offset < spawnCount; offset += 1) {
+            const candidate =
+                SPAWN_TILES[(this.nextSpawnIndex + offset) % spawnCount] ??
+                DEFAULT_SPAWN_TILE;
 
-        return tile;
+            if (!isWalkableTile(candidate.tileX, candidate.tileY)) {
+                continue;
+            }
+
+            if (this.isPlayerOnTile(candidate.tileX, candidate.tileY)) {
+                continue;
+            }
+
+            if (this.isCreatureOnTile(candidate.tileX, candidate.tileY, null)) {
+                continue;
+            }
+
+            this.nextSpawnIndex = (this.nextSpawnIndex + offset + 1) % spawnCount;
+            return candidate;
+        }
+
+        this.nextSpawnIndex = (this.nextSpawnIndex + 1) % spawnCount;
+        return DEFAULT_SPAWN_TILE;
     }
 
-    private resolvePlayerName(
-        sessionId: string,
-        options: unknown
-    ): string {
+    private resolvePlayerName(sessionId: string, options: unknown): string {
         const fallbackName = `Player-${sessionId.slice(0, 4)}`;
 
         if (typeof options !== 'object' || options === null) {
             return fallbackName;
         }
 
-        const candidate =
-            (options as { name?: unknown }).name;
+        const candidate = (options as { name?: unknown }).name;
 
         if (typeof candidate !== 'string') {
             return fallbackName;
@@ -297,29 +259,63 @@ export class WorldRoom extends Room<WorldState> {
         return normalizedName;
     }
 
-    private initializeCreatures(): void {
+    private initializeRoomCreatures(): void {
         for (const spawn of CREATURE_SPAWNS) {
-            this.creatures.set(spawn.id, {
-                id: spawn.id,
-                name: spawn.name,
-                spawnTileX: spawn.tileX,
-                spawnTileY: spawn.tileY,
-                tileX: spawn.tileX,
-                tileY: spawn.tileY,
-                maxHealth: spawn.maxHealth,
-                currentHealth: spawn.maxHealth,
-                isAlive: true
-            });
+            const creature = new CreatureState();
+            const spawnTile = this.resolveInitialCreatureSpawn(spawn.spawnTile);
+
+            creature.id = spawn.id;
+            creature.type = spawn.type;
+            creature.name = spawn.name;
+            creature.tileX = spawnTile.tileX;
+            creature.tileY = spawnTile.tileY;
+            creature.spawnTileX = spawnTile.tileX;
+            creature.spawnTileY = spawnTile.tileY;
+            creature.health = spawn.maxHealth;
+            creature.maxHealth = spawn.maxHealth;
+            creature.isAlive = true;
+
+            this.state.creatures.set(creature.id, creature);
         }
     }
 
+    private resolveInitialCreatureSpawn(preferredSpawnTile: TilePosition): TilePosition {
+        if (
+            isWalkableTile(preferredSpawnTile.tileX, preferredSpawnTile.tileY) &&
+            !this.isPlayerOnTile(preferredSpawnTile.tileX, preferredSpawnTile.tileY) &&
+            !this.isCreatureOnTile(preferredSpawnTile.tileX, preferredSpawnTile.tileY, null)
+        ) {
+            return preferredSpawnTile;
+        }
+
+        for (let tileY = 0; tileY < MAP_HEIGHT_IN_TILES; tileY += 1) {
+            for (let tileX = 0; tileX < MAP_WIDTH_IN_TILES; tileX += 1) {
+                if (!isWalkableTile(tileX, tileY)) {
+                    continue;
+                }
+
+                if (this.isPlayerOnTile(tileX, tileY)) {
+                    continue;
+                }
+
+                if (this.isCreatureOnTile(tileX, tileY, null)) {
+                    continue;
+                }
+
+                return { tileX, tileY };
+            }
+        }
+
+        return preferredSpawnTile;
+    }
+
     private tickCreatures(): void {
-        for (const creature of this.creatures.values()) {
+        for (const creature of this.state.creatures.values()) {
             if (!creature.isAlive) {
                 continue;
             }
 
-            const directions = [...CREATURE_MOVE_DIRECTIONS];
+            const directions = [...DIRECTIONS];
 
             for (let index = directions.length - 1; index > 0; index -= 1) {
                 const swapIndex = Math.floor(Math.random() * (index + 1));
@@ -329,8 +325,9 @@ export class WorldRoom extends Room<WorldState> {
             }
 
             for (const direction of directions) {
-                const nextTileX = creature.tileX + direction.tileX;
-                const nextTileY = creature.tileY + direction.tileY;
+                const delta = DIRECTION_DELTAS[direction];
+                const nextTileX = creature.tileX + delta.deltaX;
+                const nextTileY = creature.tileY + delta.deltaY;
 
                 if (!this.canCreatureMoveTo(creature.id, nextTileX, nextTileY)) {
                     continue;
@@ -338,21 +335,13 @@ export class WorldRoom extends Room<WorldState> {
 
                 creature.tileX = nextTileX;
                 creature.tileY = nextTileY;
-
-                const payload: CreatureMovedMessage = {
-                    creatureId: creature.id,
-                    tileX: creature.tileX,
-                    tileY: creature.tileY
-                };
-
-                this.broadcast('creature:moved', payload);
                 break;
             }
         }
     }
 
     private canCreatureMoveTo(
-        creatureId: string,
+        creatureId: CreatureId,
         tileX: number,
         tileY: number
     ): boolean {
@@ -360,20 +349,12 @@ export class WorldRoom extends Room<WorldState> {
             return false;
         }
 
-        for (const player of this.state.players.values()) {
-            if (player.tileX === tileX && player.tileY === tileY) {
-                return false;
-            }
+        if (this.isPlayerOnTile(tileX, tileY)) {
+            return false;
         }
 
-        for (const creature of this.creatures.values()) {
-            if (!creature.isAlive || creature.id === creatureId) {
-                continue;
-            }
-
-            if (creature.tileX === tileX && creature.tileY === tileY) {
-                return false;
-            }
+        if (this.isCreatureOnTile(tileX, tileY, creatureId)) {
+            return false;
         }
 
         return true;
@@ -398,7 +379,7 @@ export class WorldRoom extends Room<WorldState> {
             }
         }
 
-        for (const creature of this.creatures.values()) {
+        for (const creature of this.state.creatures.values()) {
             if (!creature.isAlive) {
                 continue;
             }
@@ -411,27 +392,21 @@ export class WorldRoom extends Room<WorldState> {
         return true;
     }
 
-    private killCreature(creature: ServerCreatureState): void {
+    private killCreature(creature: CreatureState): void {
         if (!creature.isAlive) {
             return;
         }
 
         creature.isAlive = false;
-        creature.currentHealth = 0;
-
-        const killedPayload: CreatureKilledMessage = {
-            creatureId: creature.id
-        };
-
-        this.broadcast('creature:killed', killedPayload);
+        creature.health = 0;
 
         this.clock.setTimeout(() => {
             this.respawnCreature(creature.id);
         }, CREATURE_RESPAWN_DELAY_MS);
     }
 
-    private respawnCreature(creatureId: string): void {
-        const creature = this.creatures.get(creatureId);
+    private respawnCreature(creatureId: CreatureId): void {
+        const creature = this.state.creatures.get(creatureId);
 
         if (!creature) {
             return;
@@ -439,32 +414,39 @@ export class WorldRoom extends Room<WorldState> {
 
         creature.tileX = creature.spawnTileX;
         creature.tileY = creature.spawnTileY;
-        creature.currentHealth = creature.maxHealth;
+        creature.health = creature.maxHealth;
         creature.isAlive = true;
-
-        const payload: CreatureRespawnedMessage = {
-            creatureId: creature.id,
-            tileX: creature.tileX,
-            tileY: creature.tileY,
-            currentHealth: creature.currentHealth
-        };
-
-        this.broadcast('creature:respawned', payload);
     }
 
-    private createCreatureSnapshot(): CreatureSnapshotMessage {
-        const creatures: CreatureStateSnapshot[] = [];
-
-        for (const creature of this.creatures.values()) {
-            creatures.push({
-                creatureId: creature.id,
-                tileX: creature.tileX,
-                tileY: creature.tileY,
-                currentHealth: creature.currentHealth,
-                isAlive: creature.isAlive
-            });
+    private isPlayerOnTile(tileX: number, tileY: number): boolean {
+        for (const player of this.state.players.values()) {
+            if (player.tileX === tileX && player.tileY === tileY) {
+                return true;
+            }
         }
 
-        return { creatures };
+        return false;
+    }
+
+    private isCreatureOnTile(
+        tileX: number,
+        tileY: number,
+        ignoredCreatureId: CreatureId | null
+    ): boolean {
+        for (const creature of this.state.creatures.values()) {
+            if (!creature.isAlive) {
+                continue;
+            }
+
+            if (ignoredCreatureId !== null && creature.id === ignoredCreatureId) {
+                continue;
+            }
+
+            if (creature.tileX === tileX && creature.tileY === tileY) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

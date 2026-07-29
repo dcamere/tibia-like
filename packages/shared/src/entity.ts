@@ -4,3 +4,5 @@
  * sites document intent and can evolve independently of `string`.
  */
 export type EntityId = string;
+
+export type CreatureId = EntityId;

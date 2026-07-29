@@ -1,21 +1,16 @@
-import {
-    GameObjects,
-    Scene,
-    Utils
-} from 'phaser';
+import { GameObjects, Scene } from 'phaser';
 import { Client as ColyseusClient, Room } from 'colyseus.js';
-import type { AttackInput, MoveInput } from '@tibia-like/shared';
+import {
+    CLIENT_TO_SERVER_MESSAGE,
+    WORLD_ROOM_NAME,
+    type AttackInput,
+    type MoveInput
+} from '@tibia-like/shared';
 
 import { Creature } from '../entities/Creature';
 import { Player } from '../entities/Player';
-import {
-    DIRECTION_DELTAS,
-    KeyboardController
-} from '../input/KeyboardController';
-import {
-    TilePosition,
-    tileToWorldPosition
-} from '../world/coordinates';
+import { KeyboardController } from '../input/KeyboardController';
+import { tileToWorldPosition } from '../world/coordinates';
 
 import {
     MAP_HEIGHT_IN_TILES,
@@ -28,18 +23,8 @@ import {
 } from '../world/WorldMap';
 
 import { CollisionSystem } from '../systems/CollisionSystem';
-import { CombatSystem } from '../systems/CombatSystem';
-import { MovementSystem } from '../systems/MovementSystem';
 
 import { UIScene } from './UIScene';
-
-type CreatureSpawnDefinition = {
-    id: string;
-    name: string;
-    tileX: number;
-    tileY: number;
-    maxHealth: number;
-};
 
 type WorldPlayerState = {
     id: string;
@@ -48,35 +33,22 @@ type WorldPlayerState = {
     tileY: number;
 };
 
-type WorldRoomState = {
-    players: unknown;
-};
-
-type MoveMessage = MoveInput;
-
-type CreatureMovedMessage = {
-    creatureId: string;
+type WorldCreatureState = {
+    id: string;
+    type: string;
+    name: string;
     tileX: number;
     tileY: number;
-};
-
-type CreatureStateSnapshot = {
-    creatureId: string;
-    tileX: number;
-    tileY: number;
-    currentHealth: number;
+    spawnTileX: number;
+    spawnTileY: number;
+    health: number;
+    maxHealth: number;
     isAlive: boolean;
 };
 
-type CreatureSnapshotMessage = {
-    creatures: CreatureStateSnapshot[];
-};
-
-type CreatureRespawnedMessage = {
-    creatureId: string;
-    tileX: number;
-    tileY: number;
-    currentHealth: number;
+type WorldRoomState = {
+    players: unknown;
+    creatures: unknown;
 };
 
 type RawMatchmakeResponse = {
@@ -113,13 +85,10 @@ type NetworkPlayerVisual = {
 
 export class Game extends Scene {
     private player!: Player;
-    private creatures: Creature[] = [];
+    private readonly creatures = new Map<string, Creature>();
 
     private keyboardController!: KeyboardController;
-
     private collisionSystem!: CollisionSystem;
-    private movementSystem!: MovementSystem;
-    private combatSystem!: CombatSystem;
 
     private uiScene!: UIScene;
 
@@ -133,31 +102,14 @@ export class Game extends Scene {
     private isGameReady = false;
 
     private readonly networkPlayers = new Map<string, NetworkPlayerVisual>();
-    private readonly pendingRespawnCreatureIds = new Set<string>();
+    private readonly knownCreatureAliveById = new Map<string, boolean>();
 
     private canMove = true;
     private canAttack = true;
 
     private readonly moveCooldownMs = 120;
+    private readonly attackCooldownMs = 500;
     private readonly movementDurationMs = 100;
-    private readonly enableLocalCreatureMovement = false;
-
-    private readonly creatureSpawnDefinitions: CreatureSpawnDefinition[] = [
-        {
-            id: 'creature-rat-1',
-            name: 'Rat',
-            tileX: 11,
-            tileY: 11,
-            maxHealth: 30
-        },
-        {
-            id: 'creature-rat-2',
-            name: 'Rat',
-            tileX: 16,
-            tileY: 3,
-            maxHealth: 30
-        }
-    ];
 
     constructor() {
         super('Game');
@@ -168,11 +120,7 @@ export class Game extends Scene {
     }
 
     update(): void {
-        if (!this.isGameReady) {
-            return;
-        }
-
-        if (!this.canMove) {
+        if (!this.isGameReady || !this.canMove) {
             return;
         }
 
@@ -182,22 +130,15 @@ export class Game extends Scene {
             return;
         }
 
-        this.tryMovePlayer(direction);
+        this.sendPlayerMove(direction);
+        this.startMoveCooldown();
     }
 
     private createWorld(): void {
         this.cameras.main.setBackgroundColor('#16211b');
 
-        for (
-            let tileY = 0;
-            tileY < MAP_HEIGHT_IN_TILES;
-            tileY += 1
-        ) {
-            for (
-                let tileX = 0;
-                tileX < MAP_WIDTH_IN_TILES;
-                tileX += 1
-            ) {
+        for (let tileY = 0; tileY < MAP_HEIGHT_IN_TILES; tileY += 1) {
+            for (let tileX = 0; tileX < MAP_WIDTH_IN_TILES; tileX += 1) {
                 const tileType = WORLD_MAP[tileY][tileX];
 
                 this.createGroundTile(tileX, tileY);
@@ -215,12 +156,8 @@ export class Game extends Scene {
             .setStrokeStyle(4, 0x111111);
     }
 
-    private createGroundTile(
-        tileX: number,
-        tileY: number
-    ): void {
+    private createGroundTile(tileX: number, tileY: number): void {
         const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
-
         const alternate = (tileX + tileY) % 2 === 0;
 
         this.add
@@ -234,11 +171,7 @@ export class Game extends Scene {
             .setStrokeStyle(1, 0x29472f, 0.45);
     }
 
-    private createTileObject(
-        tileX: number,
-        tileY: number,
-        tileType: TileType
-    ): void {
+    private createTileObject(tileX: number, tileY: number, tileType: TileType): void {
         switch (tileType) {
             case TileType.Wall:
                 this.createWall(tileX, tileY);
@@ -256,73 +189,45 @@ export class Game extends Scene {
                 break;
 
             default:
-                console.warn(
-                    `Unknown tile type ${tileType} at ${tileX},${tileY}`
-                );
+                console.warn(`Unknown tile type ${tileType} at ${tileX},${tileY}`);
         }
     }
 
-    private createWall(
-        tileX: number,
-        tileY: number
-    ): void {
+    private createWall(tileX: number, tileY: number): void {
         const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
 
         this.add
-            .rectangle(
-                position.x,
-                position.y,
-                TILE_SIZE,
-                TILE_SIZE,
-                0x806044
-            )
+            .rectangle(position.x, position.y, TILE_SIZE, TILE_SIZE, 0x806044)
             .setStrokeStyle(2, 0x3d291c)
             .setDepth(5);
     }
 
-    private createTree(
-        tileX: number,
-        tileY: number
-    ): void {
+    private createTree(tileX: number, tileY: number): void {
         const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
 
-        this.add
-            .rectangle(
-                position.x,
-                position.y + 8,
-                8,
-                16,
-                0x68421f
-            )
-            .setDepth(5);
+        this.add.rectangle(position.x, position.y + 8, 8, 16, 0x68421f).setDepth(5);
 
         this.add
-            .circle(
-                position.x,
-                position.y - 3,
-                13,
-                0x1f7a35
-            )
+            .circle(position.x, position.y - 3, 13, 0x1f7a35)
             .setStrokeStyle(2, 0x124d22)
             .setDepth(6);
     }
 
-    private createRock(
-        tileX: number,
-        tileY: number
-    ): void {
+    private createRock(tileX: number, tileY: number): void {
         const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
 
         this.add
-            .ellipse(
-                position.x,
-                position.y,
-                TILE_SIZE - 6,
-                TILE_SIZE - 12,
-                0x7b7f84
-            )
+            .ellipse(position.x, position.y, TILE_SIZE - 6, TILE_SIZE - 12, 0x7b7f84)
             .setStrokeStyle(2, 0x414449)
             .setDepth(5);
+    }
+
+    private createSystems(): void {
+        this.collisionSystem = new CollisionSystem(
+            WORLD_MAP,
+            MAP_WIDTH_IN_TILES,
+            MAP_HEIGHT_IN_TILES
+        );
     }
 
     private createPlayer(name: string): void {
@@ -330,9 +235,7 @@ export class Game extends Scene {
         const initialTileY = 5;
 
         if (!this.collisionSystem.isWalkable(initialTileX, initialTileY)) {
-            throw new Error(
-                'The initial player position is invalid.'
-            );
+            throw new Error('The initial player position is invalid.');
         }
 
         this.player = new Player(this, {
@@ -344,110 +247,6 @@ export class Game extends Scene {
         });
     }
 
-    private createCreatures(): void {
-        for (const definition of this.creatureSpawnDefinitions) {
-            if (
-                !this.collisionSystem.isWalkable(
-                    definition.tileX,
-                    definition.tileY
-                )
-            ) {
-                throw new Error(
-                    `Invalid spawn position for creature ${definition.id}.`
-                );
-            }
-
-            const creature = new Creature(this, {
-                id: definition.id,
-                name: definition.name,
-                tileX: definition.tileX,
-                tileY: definition.tileY,
-                tileSize: TILE_SIZE,
-                maxHealth: definition.maxHealth
-            });
-
-            creature.onClick(() => {
-                this.selectCreature(creature);
-            });
-
-            this.creatures.push(creature);
-        }
-    }
-
-    private startCreatureMovement(): void {
-        this.time.addEvent({
-            delay: 700,
-            loop: true,
-            callback: () => {
-                if (!this.enableLocalCreatureMovement) {
-                    return;
-                }
-
-                for (const creature of this.creatures) {
-                    this.tryMoveCreature(creature);
-                }
-            }
-        });
-    }
-
-    private tryMoveCreature(creature: Creature): void {
-        if (!creature.isAlive) {
-            return;
-        }
-
-        const possibleDirections = Object.values(DIRECTION_DELTAS);
-
-        Utils.Array.Shuffle(possibleDirections);
-
-        for (const direction of possibleDirections) {
-            const nextTileX =
-                creature.tileX + direction.deltaX;
-
-            const nextTileY =
-                creature.tileY + direction.deltaY;
-
-            if (
-                !this.canCreatureMoveTo(
-                    creature,
-                    nextTileX,
-                    nextTileY
-                )
-            ) {
-                continue;
-            }
-
-            creature.moveTo(
-                nextTileX,
-                nextTileY,
-                250
-            );
-
-            return;
-        }
-    }
-
-    private canCreatureMoveTo(
-        creature: Creature,
-        tileX: number,
-        tileY: number
-    ): boolean {
-        const occupiedTiles: TilePosition[] = [
-            { tileX: this.player.tileX, tileY: this.player.tileY },
-            ...this.creatures
-                .filter((other) => other !== creature && other.isAlive)
-                .map((other) => ({
-                    tileX: other.tileX,
-                    tileY: other.tileY
-                }))
-        ];
-
-        return this.movementSystem.canMoveTo(
-            tileX,
-            tileY,
-            occupiedTiles
-        );
-    }
-
     private createKeyboardControls(): void {
         this.keyboardController = new KeyboardController(this);
     }
@@ -456,9 +255,7 @@ export class Game extends Scene {
         const keyboard = this.input.keyboard;
 
         if (!keyboard) {
-            throw new Error(
-                'Keyboard input is not available.'
-            );
+            throw new Error('Keyboard input is not available.');
         }
 
         keyboard.on('keydown-SPACE', () => {
@@ -469,49 +266,17 @@ export class Game extends Scene {
             this.deselectCreature();
         });
 
-        this.input.on(
-            'pointerdown',
-            (
-                _pointer: unknown,
-                currentlyOver: unknown[]
-            ) => {
-                if (currentlyOver.length === 0) {
-                    this.deselectCreature();
-                }
+        this.input.on('pointerdown', (_pointer: unknown, currentlyOver: unknown[]) => {
+            if (currentlyOver.length === 0) {
+                this.deselectCreature();
             }
-        );
-    }
-
-    private createSystems(): void {
-        this.collisionSystem = new CollisionSystem(
-            WORLD_MAP,
-            MAP_WIDTH_IN_TILES,
-            MAP_HEIGHT_IN_TILES
-        );
-
-        this.movementSystem = new MovementSystem(this.collisionSystem);
-
-        this.combatSystem = new CombatSystem({
-            attackRangeInTiles: 1,
-            damage: 10,
-            cooldownMs: 500
         });
     }
 
     private configureCamera(): void {
-        this.cameras.main.setBounds(
-            0,
-            0,
-            WORLD_WIDTH,
-            WORLD_HEIGHT
-        );
+        this.cameras.main.setBounds(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
-        this.cameras.main.startFollow(
-            this.player.gameObject,
-            true,
-            0.15,
-            0.15
-        );
+        this.cameras.main.startFollow(this.player.gameObject, true, 0.15, 0.15);
 
         this.cameras.main.setZoom(1.5);
     }
@@ -521,9 +286,33 @@ export class Game extends Scene {
         this.uiScene = this.scene.get('UIScene') as UIScene;
     }
 
-    private tryMovePlayer(direction: MoveInput['direction']): void {
-        this.sendPlayerMove(direction);
-        this.startMoveCooldown();
+    private startMoveCooldown(): void {
+        this.canMove = false;
+
+        this.time.delayedCall(this.moveCooldownMs, () => {
+            this.canMove = true;
+        });
+    }
+
+    private tryAttack(): void {
+        if (!this.canAttack || !this.selectedCreature) {
+            return;
+        }
+
+        if (!this.selectedCreature.isAlive) {
+            return;
+        }
+
+        this.sendAttackIntent(this.selectedCreature.id);
+        this.startAttackCooldown();
+    }
+
+    private startAttackCooldown(): void {
+        this.canAttack = false;
+
+        this.time.delayedCall(this.attackCooldownMs, () => {
+            this.canAttack = true;
+        });
     }
 
     private sendPlayerMove(direction: MoveInput['direction']): void {
@@ -531,20 +320,20 @@ export class Game extends Scene {
             return;
         }
 
-        const payload: MoveMessage = { direction };
-
-        this.worldRoom.send('player:move', payload);
+        const payload: MoveInput = { direction };
+        this.worldRoom.send(CLIENT_TO_SERVER_MESSAGE.PLAYER_MOVE, payload);
     }
 
-    private startMoveCooldown(): void {
-        this.canMove = false;
+    private sendAttackIntent(creatureId: string): void {
+        if (this.worldRoom === null) {
+            return;
+        }
 
-        this.time.delayedCall(
-            this.moveCooldownMs,
-            () => {
-                this.canMove = true;
-            }
-        );
+        const payload: AttackInput = {
+            creatureId
+        };
+
+        this.worldRoom.send(CLIENT_TO_SERVER_MESSAGE.PLAYER_ATTACK, payload);
     }
 
     private selectCreature(creature: Creature): void {
@@ -574,40 +363,7 @@ export class Game extends Scene {
         this.selectedCreature = null;
     }
 
-    private tryAttack(): void {
-        if (!this.canAttack || !this.selectedCreature) {
-            return;
-        }
-
-        const target = this.selectedCreature;
-
-        if (!target.isAlive) {
-            return;
-        }
-
-        this.sendAttackIntent(target.id);
-
-        this.startAttackCooldown();
-    }
-
-    private startAttackCooldown(): void {
-        this.canAttack = false;
-
-        this.time.delayedCall(
-            this.combatSystem.cooldownMs,
-            () => {
-                this.canAttack = true;
-            }
-        );
-    }
-
     private handleCreatureDeath(creature: Creature): void {
-        if (this.pendingRespawnCreatureIds.has(creature.id)) {
-            return;
-        }
-
-        this.pendingRespawnCreatureIds.add(creature.id);
-
         if (this.selectedCreature === creature) {
             this.selectedCreature = null;
         }
@@ -615,245 +371,191 @@ export class Game extends Scene {
         this.uiScene.logMessage(`${creature.name} ha muerto.`);
     }
 
-    private sendAttackIntent(targetId: string): void {
-        if (this.worldRoom === null) {
-            return;
-        }
-
-        const payload: AttackInput = {
-            targetId
-        };
-
-        this.worldRoom.send('player:attack', payload);
+    private handleCreatureRespawn(creature: Creature): void {
+        this.uiScene.logMessage(`${creature.name} ha reaparecido.`);
     }
 
-    private handleCreatureDamagedMessage(message: unknown): void {
-        if (!this.isRecord(message)) {
-            return;
-        }
-
-        const { creatureId, damage } = message;
-
-        if (
-            typeof creatureId !== 'string' ||
-            typeof damage !== 'number' ||
-            !Number.isFinite(damage)
-        ) {
-            return;
-        }
-
-        const creature = this.findCreatureById(creatureId);
-
-        if (!creature || !creature.isAlive) {
-            return;
-        }
-
-        creature.takeDamage(damage);
-        this.showDamageText(creature, damage);
+    private findCreatureById(id: string): Creature | null {
+        return this.creatures.get(id) ?? null;
     }
 
-    private handleCreatureKilledMessage(message: unknown): void {
-        if (!this.isRecord(message)) {
-            return;
+    private syncCreatures(rawCreatures: unknown): void {
+        const seenIds = new Set<string>();
+
+        for (const creatureState of this.extractCreatures(rawCreatures)) {
+            seenIds.add(creatureState.id);
+            this.upsertCreatureFromServer(creatureState);
         }
 
-        const { creatureId } = message;
-
-        if (typeof creatureId !== 'string') {
-            return;
-        }
-
-        const creature = this.findCreatureById(creatureId);
-
-        if (!creature) {
-            return;
-        }
-
-        if (creature.isAlive) {
-            creature.takeDamage(creature.currentHealth);
-        }
-
-        this.handleCreatureDeath(creature);
-    }
-
-    private handleCreatureMovedMessage(message: unknown): void {
-        if (!this.isRecord(message)) {
-            return;
-        }
-
-        const { creatureId, tileX, tileY } = message;
-
-        if (
-            typeof creatureId !== 'string' ||
-            typeof tileX !== 'number' ||
-            typeof tileY !== 'number' ||
-            !Number.isFinite(tileX) ||
-            !Number.isFinite(tileY)
-        ) {
-            return;
-        }
-
-        const payload: CreatureMovedMessage = {
-            creatureId,
-            tileX,
-            tileY
-        };
-
-        const creature = this.findCreatureById(payload.creatureId);
-
-        if (!creature || !creature.isAlive) {
-            return;
-        }
-
-        creature.syncFromServer(
-            {
-                tileX: payload.tileX,
-                tileY: payload.tileY,
-                currentHealth: creature.currentHealth,
-                isAlive: true
-            },
-            250
-        );
-    }
-
-    private handleCreatureSnapshotMessage(message: unknown): void {
-        if (!this.isRecord(message)) {
-            return;
-        }
-
-        const { creatures } = message;
-
-        if (!Array.isArray(creatures)) {
-            return;
-        }
-
-        const snapshotMessage: CreatureSnapshotMessage = {
-            creatures: creatures as CreatureStateSnapshot[]
-        };
-
-        for (const entry of snapshotMessage.creatures) {
-            const snapshot = this.parseCreatureSnapshotEntry(entry);
-
-            if (snapshot === null) {
+        for (const [id, creature] of this.creatures.entries()) {
+            if (seenIds.has(id)) {
                 continue;
             }
 
-            const creature = this.findCreatureById(snapshot.creatureId);
-
-            if (!creature) {
-                continue;
+            if (this.selectedCreature === creature) {
+                this.selectedCreature = null;
             }
+
+            creature.destroy();
+            this.creatures.delete(id);
+            this.knownCreatureAliveById.delete(id);
+        }
+    }
+
+    private upsertCreatureFromServer(creatureState: WorldCreatureState): void {
+        const existing = this.findCreatureById(creatureState.id);
+
+        if (existing === null) {
+            const creature = new Creature(this, {
+                id: creatureState.id,
+                name: creatureState.name,
+                tileX: creatureState.tileX,
+                tileY: creatureState.tileY,
+                tileSize: TILE_SIZE,
+                maxHealth: creatureState.maxHealth
+            });
+
+            creature.onClick(() => {
+                this.selectCreature(creature);
+            });
 
             creature.syncFromServer(
                 {
-                    tileX: snapshot.tileX,
-                    tileY: snapshot.tileY,
-                    currentHealth: snapshot.currentHealth,
-                    isAlive: snapshot.isAlive
+                    tileX: creatureState.tileX,
+                    tileY: creatureState.tileY,
+                    currentHealth: creatureState.health,
+                    isAlive: creatureState.isAlive
                 },
                 0
             );
 
-            if (snapshot.isAlive) {
-                this.pendingRespawnCreatureIds.delete(snapshot.creatureId);
-            } else {
-                this.pendingRespawnCreatureIds.add(snapshot.creatureId);
-            }
-        }
-    }
-
-    private handleCreatureRespawnedMessage(message: unknown): void {
-        if (!this.isRecord(message)) {
+            this.creatures.set(creature.id, creature);
+            this.knownCreatureAliveById.set(creature.id, creatureState.isAlive);
             return;
         }
 
-        const { creatureId, tileX, tileY, currentHealth } = message;
+        const previousHealth = existing.currentHealth;
+        const previousAlive = this.knownCreatureAliveById.get(existing.id);
 
-        if (
-            typeof creatureId !== 'string' ||
-            typeof tileX !== 'number' ||
-            typeof tileY !== 'number' ||
-            typeof currentHealth !== 'number' ||
-            !Number.isFinite(tileX) ||
-            !Number.isFinite(tileY) ||
-            !Number.isFinite(currentHealth)
-        ) {
-            return;
-        }
+        const hasMoved =
+            existing.tileX !== creatureState.tileX ||
+            existing.tileY !== creatureState.tileY;
 
-        const payload: CreatureRespawnedMessage = {
-            creatureId,
-            tileX,
-            tileY,
-            currentHealth
-        };
-
-        const creature = this.findCreatureById(payload.creatureId);
-
-        if (!creature) {
-            return;
-        }
-
-        this.pendingRespawnCreatureIds.delete(payload.creatureId);
-
-        creature.syncFromServer(
+        existing.syncFromServer(
             {
-                tileX: payload.tileX,
-                tileY: payload.tileY,
-                currentHealth: payload.currentHealth,
-                isAlive: true
+                tileX: creatureState.tileX,
+                tileY: creatureState.tileY,
+                currentHealth: creatureState.health,
+                isAlive: creatureState.isAlive
             },
-            0
+            creatureState.isAlive && hasMoved ? this.movementDurationMs : 0
         );
 
-        this.uiScene.logMessage(`${creature.name} ha reaparecido.`);
+        if (creatureState.isAlive && previousHealth > creatureState.health) {
+            this.showDamageText(existing, previousHealth - creatureState.health);
+        }
+
+        if (previousAlive === true && creatureState.isAlive === false) {
+            this.handleCreatureDeath(existing);
+        }
+
+        if (previousAlive === false && creatureState.isAlive === true) {
+            this.handleCreatureRespawn(existing);
+        }
+
+        this.knownCreatureAliveById.set(existing.id, creatureState.isAlive);
     }
 
-    private parseCreatureSnapshotEntry(
-        entry: unknown
-    ): CreatureStateSnapshot | null {
-        if (!this.isRecord(entry)) {
+    private extractCreatures(rawCreatures: unknown): WorldCreatureState[] {
+        if (!this.isRecord(rawCreatures)) {
+            return [];
+        }
+
+        const mapLike = rawCreatures as {
+            entries?: () => IterableIterator<[string, unknown]>;
+        };
+
+        const creatures: WorldCreatureState[] = [];
+
+        if (typeof mapLike.entries === 'function') {
+            for (const [_id, rawCreature] of mapLike.entries()) {
+                const creature = this.parseWorldCreatureState(rawCreature);
+
+                if (creature !== null) {
+                    creatures.push(creature);
+                }
+            }
+
+            return creatures;
+        }
+
+        for (const [, rawCreature] of Object.entries(rawCreatures)) {
+            const creature = this.parseWorldCreatureState(rawCreature);
+
+            if (creature !== null) {
+                creatures.push(creature);
+            }
+        }
+
+        return creatures;
+    }
+
+    private parseWorldCreatureState(rawCreature: unknown): WorldCreatureState | null {
+        if (!this.isRecord(rawCreature)) {
             return null;
         }
 
         const {
-            creatureId,
+            id,
+            type,
+            name,
             tileX,
             tileY,
-            currentHealth,
+            spawnTileX,
+            spawnTileY,
+            health,
+            maxHealth,
             isAlive
-        } = entry;
+        } = rawCreature;
 
         if (
-            typeof creatureId !== 'string' ||
+            typeof id !== 'string' ||
+            typeof type !== 'string' ||
+            typeof name !== 'string' ||
             typeof tileX !== 'number' ||
             typeof tileY !== 'number' ||
-            typeof currentHealth !== 'number' ||
-            typeof isAlive !== 'boolean' ||
+            typeof spawnTileX !== 'number' ||
+            typeof spawnTileY !== 'number' ||
+            typeof health !== 'number' ||
+            typeof maxHealth !== 'number' ||
+            typeof isAlive !== 'boolean'
+        ) {
+            return null;
+        }
+
+        if (
             !Number.isFinite(tileX) ||
             !Number.isFinite(tileY) ||
-            !Number.isFinite(currentHealth)
+            !Number.isFinite(spawnTileX) ||
+            !Number.isFinite(spawnTileY) ||
+            !Number.isFinite(health) ||
+            !Number.isFinite(maxHealth)
         ) {
             return null;
         }
 
         return {
-            creatureId,
+            id,
+            type,
+            name,
             tileX,
             tileY,
-            currentHealth,
+            spawnTileX,
+            spawnTileY,
+            health,
+            maxHealth,
             isAlive
         };
-    }
-
-    private findCreatureById(id: string): Creature | null {
-        for (const creature of this.creatures) {
-            if (creature.id === id) {
-                return creature;
-            }
-        }
-
-        return null;
     }
 
     private showDamageText(creature: Creature, damage: number): void {
@@ -902,54 +604,26 @@ export class Game extends Scene {
 
             room.onStateChange((state) => {
                 this.syncNetworkPlayers(state);
+                this.syncCreatures(state.creatures);
             });
 
             room.onLeave((code) => {
-                this.uiScene.logMessage(
-                    `Conexión cerrada (code ${code}).`
-                );
+                this.uiScene.logMessage(`Conexión cerrada (code ${code}).`);
 
                 this.worldRoom = null;
                 this.localSessionId = null;
                 this.hasAppliedServerSpawn = false;
                 this.clearNetworkPlayers();
-                this.pendingRespawnCreatureIds.clear();
+                this.clearCreatures();
             });
 
             room.onError((code, message) => {
-                this.uiScene.logMessage(
-                    `Error de red (${code}): ${message}`
-                );
-            });
-
-            room.onMessage('creature:damaged', (message: unknown) => {
-                this.handleCreatureDamagedMessage(message);
-            });
-
-            room.onMessage('creature:killed', (message: unknown) => {
-                this.handleCreatureKilledMessage(message);
-            });
-
-            room.onMessage('creature:moved', (message: unknown) => {
-                this.handleCreatureMovedMessage(message);
-            });
-
-            room.onMessage('creature:snapshot', (message: unknown) => {
-                this.handleCreatureSnapshotMessage(message);
-            });
-
-            room.onMessage('creature:respawned', (message: unknown) => {
-                this.handleCreatureRespawnedMessage(message);
+                this.uiScene.logMessage(`Error de red (${code}): ${message}`);
             });
         } catch (error: unknown) {
-            const message =
-                error instanceof Error
-                    ? error.message
-                    : 'Unknown error';
+            const message = error instanceof Error ? error.message : 'Unknown error';
 
-            this.uiScene.logMessage(
-                `No se pudo conectar al servidor: ${message}`
-            );
+            this.uiScene.logMessage(`No se pudo conectar al servidor: ${message}`);
 
             console.error('Failed to connect to world room.', error);
         } finally {
@@ -960,6 +634,7 @@ export class Game extends Scene {
     private async leaveWorldRoom(): Promise<void> {
         if (this.worldRoom === null) {
             this.clearNetworkPlayers();
+            this.clearCreatures();
             return;
         }
 
@@ -972,22 +647,18 @@ export class Game extends Scene {
             this.localSessionId = null;
             this.hasAppliedServerSpawn = false;
             this.clearNetworkPlayers();
-            this.pendingRespawnCreatureIds.clear();
+            this.clearCreatures();
         }
     }
 
     private resolveServerEndpoint(): string {
         const configuredUrl = import.meta.env.VITE_SERVER_URL;
 
-        if (
-            typeof configuredUrl === 'string' &&
-            configuredUrl.trim().length > 0
-        ) {
+        if (typeof configuredUrl === 'string' && configuredUrl.trim().length > 0) {
             return configuredUrl;
         }
 
-        const protocol =
-            window.location.protocol === 'https:' ? 'https' : 'http';
+        const protocol = window.location.protocol === 'https:' ? 'https' : 'http';
 
         return `${protocol}://${window.location.hostname}:2567`;
     }
@@ -1001,23 +672,21 @@ export class Game extends Scene {
             : endpoint;
 
         const response = await fetch(
-            `${normalizedEndpoint}/matchmake/joinOrCreate/world`,
+            `${normalizedEndpoint}/matchmake/joinOrCreate/${WORLD_ROOM_NAME}`,
             {
-                method: 'POST',
-                headers: {
-                    Accept: 'application/json',
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    name: this.localPlayerName
-                })
-            }
+            method: 'POST',
+            headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                name: this.localPlayerName
+            })
+        }
         );
 
         if (!response.ok) {
-            throw new Error(
-                `Matchmaking failed with status ${response.status}.`
-            );
+            throw new Error(`Matchmaking failed with status ${response.status}.`);
         }
 
         const payload: unknown = await response.json();
@@ -1043,27 +712,16 @@ export class Game extends Scene {
         return client.consumeSeatReservation<WorldRoomState>(seatReservation);
     }
 
-    private parseMatchmakeResponse(
-        payload: unknown
-    ): RawMatchmakeResponse | null {
+    private parseMatchmakeResponse(payload: unknown): RawMatchmakeResponse | null {
         if (!this.isRecord(payload)) {
             return null;
         }
 
         const { sessionId, protocol } = payload;
 
-        const roomSource = this.isRecord(payload.room)
-            ? payload.room
-            : payload;
+        const roomSource = this.isRecord(payload.room) ? payload.room : payload;
 
-        const {
-            name,
-            roomId,
-            processId,
-            publicAddress,
-            clients,
-            maxClients
-        } = roomSource;
+        const { name, roomId, processId, publicAddress, clients, maxClients } = roomSource;
 
         if (
             typeof name !== 'string' ||
@@ -1074,29 +732,19 @@ export class Game extends Scene {
             return null;
         }
 
-        if (
-            protocol !== undefined &&
-            typeof protocol !== 'string'
-        ) {
+        if (protocol !== undefined && typeof protocol !== 'string') {
             return null;
         }
 
-        if (
-            publicAddress !== undefined &&
-            typeof publicAddress !== 'string'
-        ) {
+        if (publicAddress !== undefined && typeof publicAddress !== 'string') {
             return null;
         }
 
         const normalizedClients =
-            typeof clients === 'number' && Number.isFinite(clients)
-                ? clients
-                : 0;
+            typeof clients === 'number' && Number.isFinite(clients) ? clients : 0;
 
         const normalizedMaxClients =
-            typeof maxClients === 'number' && Number.isFinite(maxClients)
-                ? maxClients
-                : 0;
+            typeof maxClients === 'number' && Number.isFinite(maxClients) ? maxClients : 0;
 
         return {
             name,
@@ -1128,9 +776,7 @@ export class Game extends Scene {
         }
     }
 
-    private extractPlayers(
-        rawPlayers: unknown
-    ): Array<[string, WorldPlayerState]> {
+    private extractPlayers(rawPlayers: unknown): Array<[string, WorldPlayerState]> {
         if (!this.isRecord(rawPlayers)) {
             return [];
         }
@@ -1189,10 +835,7 @@ export class Game extends Scene {
         };
     }
 
-    private upsertNetworkPlayer(
-        sessionId: string,
-        playerState: WorldPlayerState
-    ): void {
+    private upsertNetworkPlayer(sessionId: string, playerState: WorldPlayerState): void {
         const isLocalPlayer = sessionId === this.localSessionId;
 
         if (isLocalPlayer) {
@@ -1215,11 +858,7 @@ export class Game extends Scene {
             this.networkPlayers.set(sessionId, visual);
         }
 
-        const position = tileToWorldPosition(
-            playerState.tileX,
-            playerState.tileY,
-            TILE_SIZE
-        );
+        const position = tileToWorldPosition(playerState.tileX, playerState.tileY, TILE_SIZE);
 
         if (visual.tileX !== playerState.tileX || visual.tileY !== playerState.tileY) {
             this.tweens.killTweensOf(visual.container);
@@ -1236,9 +875,7 @@ export class Game extends Scene {
         visual.tileX = playerState.tileX;
         visual.tileY = playerState.tileY;
         visual.body.setFillStyle(isLocalPlayer ? 0x22d3ee : 0xf97316);
-        visual.nameLabel.setText(
-            playerState.name
-        );
+        visual.nameLabel.setText(playerState.name);
     }
 
     private syncLocalPlayerFromServer(playerState: WorldPlayerState): void {
@@ -1256,11 +893,7 @@ export class Game extends Scene {
             return;
         }
 
-        this.player.moveTo(
-            playerState.tileX,
-            playerState.tileY,
-            this.movementDurationMs
-        );
+        this.player.moveTo(playerState.tileX, playerState.tileY, this.movementDurationMs);
     }
 
     private async initializeGameSession(): Promise<void> {
@@ -1269,12 +902,10 @@ export class Game extends Scene {
         this.createSystems();
         this.createWorld();
         this.createPlayer(this.localPlayerName);
-        this.createCreatures();
         this.createKeyboardControls();
         this.createCombatControls();
         this.configureCamera();
         this.launchUiScene();
-        this.startCreatureMovement();
 
         this.events.once('shutdown', () => {
             void this.leaveWorldRoom();
@@ -1286,9 +917,7 @@ export class Game extends Scene {
     }
 
     private askPlayerName(): Promise<string> {
-        const fallbackName = `Player-${Math.random()
-            .toString(36)
-            .slice(2, 6)}`;
+        const fallbackName = `Player-${Math.random().toString(36).slice(2, 6)}`;
 
         return new Promise((resolve) => {
             const root = document.createElement('div');
@@ -1381,13 +1010,7 @@ export class Game extends Scene {
 
     private createNetworkPlayerVisual(isLocalPlayer: boolean): NetworkPlayerVisual {
         const body = this.add
-            .rectangle(
-                0,
-                0,
-                TILE_SIZE - 10,
-                TILE_SIZE - 10,
-                isLocalPlayer ? 0x22d3ee : 0xf97316
-            )
+            .rectangle(0, 0, TILE_SIZE - 10, TILE_SIZE - 10, isLocalPlayer ? 0x22d3ee : 0xf97316)
             .setStrokeStyle(2, 0x111111);
 
         const nameLabel = this.add
@@ -1419,6 +1042,20 @@ export class Game extends Scene {
         }
 
         this.networkPlayers.clear();
+    }
+
+    private clearCreatures(): void {
+        if (this.selectedCreature) {
+            this.selectedCreature.setSelected(false);
+            this.selectedCreature = null;
+        }
+
+        for (const creature of this.creatures.values()) {
+            creature.destroy();
+        }
+
+        this.creatures.clear();
+        this.knownCreatureAliveById.clear();
     }
 
     private isRecord(value: unknown): value is Record<string, unknown> {

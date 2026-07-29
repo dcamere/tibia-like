@@ -1,7 +1,9 @@
 import { Server } from '@colyseus/core';
 import { WebSocketTransport } from '@colyseus/ws-transport';
 
-import { WORLD_ROOM_NAME, WorldRoom } from './rooms/WorldRoom';
+import { WORLD_ROOM_NAME } from '@tibia-like/shared';
+
+import { WorldRoom } from './rooms/WorldRoom';
 
 const DEFAULT_PORT = 2567;
 
