@@ -1,6 +1,7 @@
 import { GameObjects, Scene } from 'phaser';
 import { Client as ColyseusClient, Room } from 'colyseus.js';
 import {
+    type AnnouncementPayload,
     type AuthCharactersResponse,
     type AuthCreateCharacterResponse,
     type AuthLoginResponse,
@@ -9,6 +10,7 @@ import {
     type CharacterSummary,
     CLIENT_TO_SERVER_MESSAGE,
     type Direction,
+    isAnnouncementPayload,
     isChatMessagePayload,
     isChatSendInput,
     SERVER_TO_CLIENT_MESSAGE,
@@ -46,6 +48,8 @@ type WorldPlayerState = {
     name: string;
     tileX: number;
     tileY: number;
+    level: number;
+    experience: number;
 };
 
 type WorldCreatureState = {
@@ -667,6 +671,10 @@ export class Game extends Scene {
             room.onMessage(SERVER_TO_CLIENT_MESSAGE.CHAT_MESSAGE, (message: unknown) => {
                 this.handleChatMessage(message);
             });
+
+            room.onMessage(SERVER_TO_CLIENT_MESSAGE.ANNOUNCEMENT, (message: unknown) => {
+                this.handleAnnouncementMessage(message);
+            });
         } catch (error: unknown) {
             const message = error instanceof Error ? error.message : 'Unknown error';
 
@@ -719,6 +727,15 @@ export class Game extends Scene {
         }
 
         this.uiScene.logChatMessage(`[Local] ${message.from}: ${message.text}`);
+    }
+
+    private handleAnnouncementMessage(message: unknown): void {
+        if (!isAnnouncementPayload(message)) {
+            return;
+        }
+
+        const payload: AnnouncementPayload = message;
+        this.uiScene.showAnnouncement(payload.from, payload.text);
     }
 
     private createChatInputOverlay(): void {
@@ -997,13 +1014,15 @@ export class Game extends Scene {
             return null;
         }
 
-        const { id, name, tileX, tileY } = rawPlayer;
+        const { id, name, tileX, tileY, level, experience } = rawPlayer;
 
         if (
             typeof id !== 'string' ||
             typeof name !== 'string' ||
             typeof tileX !== 'number' ||
-            typeof tileY !== 'number'
+            typeof tileY !== 'number' ||
+            typeof level !== 'number' ||
+            typeof experience !== 'number'
         ) {
             return null;
         }
@@ -1012,7 +1031,9 @@ export class Game extends Scene {
             id,
             name,
             tileX,
-            tileY
+            tileY,
+            level,
+            experience
         };
     }
 
@@ -1610,15 +1631,10 @@ export class Game extends Scene {
         const parsedCharacters: CharacterSummary[] = [];
 
         for (const entry of characters) {
-            if (!this.isRecord(entry)) {
-                continue;
-            }
+            const character = this.parseCharacterSummary(entry);
 
-            const id = entry.id;
-            const name = entry.name;
-
-            if (typeof id === 'string' && typeof name === 'string') {
-                parsedCharacters.push({ id, name });
+            if (character) {
+                parsedCharacters.push(character);
             }
         }
 
@@ -1680,13 +1696,9 @@ export class Game extends Scene {
             throw new Error('Invalid register response username.');
         }
 
-        const createdCharacterId = createdCharacter.id;
-        const createdCharacterName = createdCharacter.name;
+        const parsedCreatedCharacter = this.parseCharacterSummary(createdCharacter);
 
-        if (
-            typeof createdCharacterId !== 'string' ||
-            typeof createdCharacterName !== 'string'
-        ) {
+        if (!parsedCreatedCharacter) {
             throw new Error('Invalid created character payload.');
         }
 
@@ -1694,10 +1706,7 @@ export class Game extends Scene {
             accountId,
             token,
             username: usernameFromServer,
-            createdCharacter: {
-                id: createdCharacterId,
-                name: createdCharacterName
-            }
+            createdCharacter: parsedCreatedCharacter
         };
     }
 
@@ -1740,21 +1749,14 @@ export class Game extends Scene {
             throw new Error('Invalid character payload.');
         }
 
-        const characterId = character.id;
-        const characterNameFromPayload = character.name;
+        const parsedCharacter = this.parseCharacterSummary(character);
 
-        if (
-            typeof characterId !== 'string' ||
-            typeof characterNameFromPayload !== 'string'
-        ) {
+        if (!parsedCharacter) {
             throw new Error('Invalid created character shape.');
         }
 
         const result: AuthCreateCharacterResponse = {
-            character: {
-                id: characterId,
-                name: characterNameFromPayload
-            }
+            character: parsedCharacter
         };
 
         return result.character;
@@ -1799,15 +1801,10 @@ export class Game extends Scene {
         };
 
         for (const entry of payload.characters) {
-            if (!this.isRecord(entry)) {
-                continue;
-            }
+            const character = this.parseCharacterSummary(entry);
 
-            const id = entry.id;
-            const name = entry.name;
-
-            if (typeof id === 'string' && typeof name === 'string') {
-                responseBody.characters.push({ id, name });
+            if (character) {
+                responseBody.characters.push(character);
             }
         }
 
@@ -1905,5 +1902,32 @@ export class Game extends Scene {
 
     private isRecord(value: unknown): value is Record<string, unknown> {
         return typeof value === 'object' && value !== null;
+    }
+
+    private parseCharacterSummary(value: unknown): CharacterSummary | null {
+        if (!this.isRecord(value)) {
+            return null;
+        }
+
+        const id = value.id;
+        const name = value.name;
+
+        if (typeof id !== 'string' || typeof name !== 'string') {
+            return null;
+        }
+
+        const tileX = typeof value.tileX === 'number' ? value.tileX : 5;
+        const tileY = typeof value.tileY === 'number' ? value.tileY : 5;
+        const level = typeof value.level === 'number' ? value.level : 1;
+        const experience = typeof value.experience === 'number' ? value.experience : 0;
+
+        return {
+            id,
+            name,
+            tileX,
+            tileY,
+            level,
+            experience
+        };
     }
 }

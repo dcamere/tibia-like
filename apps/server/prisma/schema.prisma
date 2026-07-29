@@ -1,0 +1,203 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AccountRole {
+  player
+  gm
+}
+
+enum ContainerType {
+  inventory
+  equipment
+  bag
+  depot
+}
+
+enum EquipSlot {
+  head
+  body
+  legs
+  feet
+  hand_left
+  hand_right
+  ring
+  amulet
+  ammo
+}
+
+model Account {
+  id           String      @id @default(cuid())
+  username     String      @unique
+  passwordHash String
+  role         AccountRole @default(player)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  characters Character[]
+  sessions   Session[]
+}
+
+model Session {
+  id        String    @id @default(cuid())
+  token     String    @unique
+  accountId String
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+  @@index([expiresAt])
+}
+
+model Character {
+  id         String   @id @default(cuid())
+  accountId  String
+  name       String
+  tileX      Int      @default(5)
+  tileY      Int      @default(5)
+  level      Int      @default(1)
+  experience Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  account       Account         @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  containers    Container[]
+  items         CharacterItem[]
+  groundItems   GroundItem[]    @relation("GroundItemOwner")
+  partyMembers  PartyMember[]
+  partyLeaderOf Party[]         @relation("PartyLeader")
+
+  @@unique([accountId, name])
+  @@index([accountId])
+}
+
+model ItemDefinition {
+  id         String    @id @default(cuid())
+  slug       String    @unique
+  name       String
+  stackable  Boolean   @default(false)
+  maxStack   Int       @default(1)
+  equipSlot  EquipSlot?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  characterItems CharacterItem[]
+  groundItems    GroundItem[]
+}
+
+model Container {
+  id          String        @id @default(cuid())
+  characterId String
+  name        String
+  type        ContainerType
+  capacity    Int           @default(20)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  character Character       @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  items     CharacterItem[]
+
+  @@index([characterId])
+}
+
+model CharacterItem {
+  id               String   @id @default(cuid())
+  characterId      String
+  itemDefinitionId String
+  containerId      String?
+  quantity         Int      @default(1)
+  slotIndex        Int?
+  equippedSlot     EquipSlot?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  character      Character      @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  itemDefinition ItemDefinition @relation(fields: [itemDefinitionId], references: [id], onDelete: Restrict)
+  container      Container?     @relation(fields: [containerId], references: [id], onDelete: SetNull)
+
+  @@index([characterId])
+  @@index([containerId])
+  @@index([itemDefinitionId])
+}
+
+model GroundItem {
+  id               String    @id @default(cuid())
+  itemDefinitionId String
+  tileX            Int
+  tileY            Int
+  quantity         Int       @default(1)
+  ownerCharacterId String?
+  expiresAt        DateTime?
+  createdAt        DateTime  @default(now())
+
+  itemDefinition ItemDefinition @relation(fields: [itemDefinitionId], references: [id], onDelete: Restrict)
+  owner         Character?      @relation("GroundItemOwner", fields: [ownerCharacterId], references: [id], onDelete: SetNull)
+
+  @@index([tileX, tileY])
+  @@index([ownerCharacterId])
+}
+
+model Npc {
+  id        String   @id @default(cuid())
+  name      String
+  tileX     Int
+  tileY     Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Quest {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  description String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Spell {
+  id         String   @id @default(cuid())
+  slug       String   @unique
+  name       String
+  manaCost   Int
+  cooldownMs Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model Vocation {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Party {
+  id         String        @id @default(cuid())
+  leaderId   String
+  createdAt  DateTime      @default(now())
+
+  leader  Character        @relation("PartyLeader", fields: [leaderId], references: [id], onDelete: Cascade)
+  members PartyMember[]
+}
+
+model PartyMember {
+  id          String    @id @default(cuid())
+  partyId     String
+  characterId String
+  createdAt   DateTime  @default(now())
+
+  party     Party     @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  character Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+
+  @@unique([partyId, characterId])
+}

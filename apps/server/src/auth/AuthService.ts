@@ -1,6 +1,16 @@
-import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
+
+import { verify, hash } from '@node-rs/argon2';
+import {
+    AccountRole,
+    type Character,
+    type Prisma,
+    type Session
+} from '@prisma/client';
 
 import type { CharacterSummary } from '@tibia-like/shared';
+
+import { prisma } from '../db';
 
 export type AuthSession = {
     accountId: string;
@@ -8,30 +18,34 @@ export type AuthSession = {
     role: 'player' | 'gm';
 };
 
-type StoredAccount = {
-    accountId: string;
-    username: string;
-    passwordSalt: string;
-    passwordHash: string;
-};
-
-type StoredCharacter = CharacterSummary & {
-    accountId: string;
-};
+export type CharacterSelection = CharacterSummary;
 
 const MIN_USERNAME_LENGTH = 3;
 const MAX_USERNAME_LENGTH = 20;
 const MIN_PASSWORD_LENGTH = 6;
 const MIN_CHARACTER_NAME_LENGTH = 3;
 const MAX_CHARACTER_NAME_LENGTH = 20;
-const GM_USERNAMES = new Set<string>(['ekkel']);
+const SESSION_SELECT = {
+    token: true,
+    accountId: true,
+    expiresAt: true,
+    revokedAt: true,
+    account: {
+        select: {
+            username: true,
+            role: true
+        }
+    }
+} satisfies Prisma.SessionSelect;
 
-const accountsByUsername = new Map<string, StoredAccount>();
-const sessionsByToken = new Map<string, AuthSession>();
-const charactersByAccountId = new Map<string, StoredCharacter[]>();
+const tokenTtlHours = Number.parseInt(process.env.TOKEN_TTL_HOURS ?? '168', 10);
 
 const normalizeUsername = (username: string): string => {
     return username.trim().toLowerCase();
+};
+
+const normalizeCharacterName = (value: string): string => {
+    return value.trim().slice(0, MAX_CHARACTER_NAME_LENGTH);
 };
 
 const isValidUsername = (username: string): boolean => {
@@ -45,26 +59,6 @@ const isValidUsername = (username: string): boolean => {
     return /^[a-z0-9_]+$/.test(username);
 };
 
-const hashPassword = (password: string, salt: string): string => {
-    return scryptSync(password, salt, 64).toString('hex');
-};
-
-const createAccountId = (): string => {
-    return `acc_${randomBytes(8).toString('hex')}`;
-};
-
-const createToken = (): string => {
-    return `tok_${randomBytes(24).toString('hex')}`;
-};
-
-const createCharacterId = (): string => {
-    return `chr_${randomBytes(8).toString('hex')}`;
-};
-
-const normalizeCharacterName = (value: string): string => {
-    return value.trim().slice(0, MAX_CHARACTER_NAME_LENGTH);
-};
-
 const isValidCharacterName = (value: string): boolean => {
     return (
         value.length >= MIN_CHARACTER_NAME_LENGTH &&
@@ -72,220 +66,320 @@ const isValidCharacterName = (value: string): boolean => {
     );
 };
 
-const verifyPassword = (
-    candidatePassword: string,
-    account: StoredAccount
-): boolean => {
-    const candidateHash = hashPassword(
-        candidatePassword,
-        account.passwordSalt
-    );
-
-    const left = Buffer.from(candidateHash, 'hex');
-    const right = Buffer.from(account.passwordHash, 'hex');
-
-    if (left.length !== right.length) {
-        return false;
-    }
-
-    return timingSafeEqual(left, right);
+const createToken = (): string => {
+    return `tok_${randomBytes(24).toString('hex')}`;
 };
 
-const createCharacterForAccount = (
-    accountId: string,
-    characterNameInput: string
-): CharacterSummary => {
-    const characterName = normalizeCharacterName(characterNameInput);
+const toRole = (role: AccountRole): 'player' | 'gm' => {
+    return role === AccountRole.gm ? 'gm' : 'player';
+};
 
-    if (!isValidCharacterName(characterName)) {
-        throw new Error('Character name must be 3-20 characters.');
-    }
-
-    const characters = charactersByAccountId.get(accountId) ?? [];
-
-    const alreadyExists = characters.some(
-        (character) => character.name.toLowerCase() === characterName.toLowerCase()
-    );
-
-    if (alreadyExists) {
-        throw new Error('Character name already exists in this account.');
-    }
-
-    const createdCharacter: StoredCharacter = {
-        id: createCharacterId(),
-        name: characterName,
-        accountId
-    };
-
-    characters.push(createdCharacter);
-    charactersByAccountId.set(accountId, characters);
-
+const toCharacterSummary = (character: Character): CharacterSummary => {
     return {
-        id: createdCharacter.id,
-        name: createdCharacter.name
+        id: character.id,
+        name: character.name,
+        tileX: character.tileX,
+        tileY: character.tileY,
+        level: character.level,
+        experience: character.experience
     };
 };
 
-const issueSession = (account: StoredAccount): { token: string; session: AuthSession } => {
+const resolveAccountRole = (normalizedUsername: string): AccountRole => {
+    const fromEnv = (process.env.GM_USERNAMES ?? '')
+        .split(',')
+        .map((value) => value.trim().toLowerCase())
+        .filter((value) => value.length > 0);
+
+    const gmUsernames = new Set<string>(['ekkel', ...fromEnv]);
+
+    if (normalizedUsername.startsWith('gm_') || gmUsernames.has(normalizedUsername)) {
+        return AccountRole.gm;
+    }
+
+    return AccountRole.player;
+};
+
+const createSession = async (accountId: string): Promise<string> => {
     const token = createToken();
+    const ttl = Number.isFinite(tokenTtlHours) && tokenTtlHours > 0 ? tokenTtlHours : 168;
 
-    const normalizedUsername = account.username.toLowerCase();
+    const expiresAt = new Date(Date.now() + ttl * 60 * 60 * 1000);
 
-    const role: 'player' | 'gm' = (
-        normalizedUsername.startsWith('gm_') ||
-        GM_USERNAMES.has(normalizedUsername)
-    )
-        ? 'gm'
-        : 'player';
+    await prisma.session.create({
+        data: {
+            token,
+            accountId,
+            expiresAt
+        }
+    });
 
-    const session: AuthSession = {
-        accountId: account.accountId,
-        username: account.username,
-        role
-    };
-
-    sessionsByToken.set(token, session);
-
-    return { token, session };
+    return token;
 };
 
-export const registerAccount = (
+const getValidSessionByToken = async (token: string): Promise<(Session & {
+    account: {
+        username: string;
+        role: AccountRole;
+    };
+}) | null> => {
+    const session = await prisma.session.findUnique({
+        where: { token },
+        select: SESSION_SELECT
+    });
+
+    if (!session) {
+        return null;
+    }
+
+    if (session.revokedAt !== null) {
+        return null;
+    }
+
+    if (session.expiresAt.getTime() <= Date.now()) {
+        return null;
+    }
+
+    return session as Session & {
+        account: {
+            username: string;
+            role: AccountRole;
+        };
+    };
+};
+
+export const registerAccount = async (
     usernameInput: string,
     password: string,
     characterNameInput: string
-): {
+): Promise<{
     token: string;
     session: AuthSession;
     createdCharacter: CharacterSummary;
-} => {
+}> => {
     const username = normalizeUsername(usernameInput);
 
     if (!isValidUsername(username)) {
-        throw new Error(
-            'Username must be 3-20 chars and use only a-z, 0-9 or _.'
-        );
+        throw new Error('Username must be 3-20 chars and use only a-z, 0-9 or _.');
     }
 
     if (password.length < MIN_PASSWORD_LENGTH) {
         throw new Error('Password must have at least 6 characters.');
     }
 
-    if (accountsByUsername.has(username)) {
+    const characterName = normalizeCharacterName(characterNameInput);
+
+    if (!isValidCharacterName(characterName)) {
+        throw new Error('Character name must be 3-20 characters.');
+    }
+
+    const existing = await prisma.account.findUnique({
+        where: { username },
+        select: { id: true }
+    });
+
+    if (existing) {
         throw new Error('Username is already registered.');
     }
 
-    const passwordSalt = randomBytes(16).toString('hex');
-    const passwordHash = hashPassword(password, passwordSalt);
+    const passwordHash = await hash(password);
+    const role = resolveAccountRole(username);
 
-    const account: StoredAccount = {
-        accountId: createAccountId(),
-        username,
-        passwordSalt,
-        passwordHash
-    };
+    const created = await prisma.$transaction(async (tx) => {
+        const account = await tx.account.create({
+            data: {
+                username,
+                passwordHash,
+                role
+            }
+        });
 
-    accountsByUsername.set(username, account);
+        const character = await tx.character.create({
+            data: {
+                accountId: account.id,
+                name: characterName,
+                tileX: 5,
+                tileY: 5,
+                level: 1,
+                experience: 0
+            }
+        });
 
-    const createdCharacter = createCharacterForAccount(
-        account.accountId,
-        characterNameInput
-    );
+        return { account, character };
+    });
 
-    const auth = issueSession(account);
+    const token = await createSession(created.account.id);
 
     return {
-        token: auth.token,
-        session: auth.session,
-        createdCharacter
+        token,
+        session: {
+            accountId: created.account.id,
+            username: created.account.username,
+            role: toRole(created.account.role)
+        },
+        createdCharacter: toCharacterSummary(created.character)
     };
 };
 
-export const loginAccount = (
+export const loginAccount = async (
     usernameInput: string,
     password: string
-): {
+): Promise<{
     token: string;
     session: AuthSession;
     characters: CharacterSummary[];
-} => {
+}> => {
     const username = normalizeUsername(usernameInput);
-    const account = accountsByUsername.get(username);
 
-    if (!account || !verifyPassword(password, account)) {
+    const account = await prisma.account.findUnique({
+        where: { username },
+        include: {
+            characters: {
+                orderBy: {
+                    createdAt: 'asc'
+                }
+            }
+        }
+    });
+
+    if (!account) {
         throw new Error('Invalid username or password.');
     }
 
-    const storedCharacters =
-        charactersByAccountId.get(account.accountId) ?? [];
+    const isPasswordValid = await verify(account.passwordHash, password);
 
-    if (storedCharacters.length === 0) {
+    if (!isPasswordValid) {
+        throw new Error('Invalid username or password.');
+    }
+
+    if (account.characters.length === 0) {
         throw new Error('This account has no characters yet.');
     }
 
-    const auth = issueSession(account);
+    const token = await createSession(account.id);
 
     return {
-        token: auth.token,
-        session: auth.session,
-        characters: storedCharacters.map((character) => ({
-            id: character.id,
-            name: character.name
-        }))
+        token,
+        session: {
+            accountId: account.id,
+            username: account.username,
+            role: toRole(account.role)
+        },
+        characters: account.characters.map(toCharacterSummary)
     };
 };
 
-export const getSessionByToken = (token: string): AuthSession | null => {
-    return sessionsByToken.get(token) ?? null;
-};
+export const getSessionByToken = async (token: string): Promise<AuthSession | null> => {
+    const session = await getValidSessionByToken(token);
 
-export const getAccountCharacter = (
-    accountId: string,
-    characterId: string
-): CharacterSummary | null => {
-    const characters = charactersByAccountId.get(accountId);
-
-    if (!characters) {
+    if (!session) {
         return null;
     }
 
-    const character = characters.find((entry) => entry.id === characterId);
+    return {
+        accountId: session.accountId,
+        username: session.account.username,
+        role: toRole(session.account.role)
+    };
+};
+
+export const getAccountCharacter = async (
+    accountId: string,
+    characterId: string
+): Promise<CharacterSelection | null> => {
+    const character = await prisma.character.findFirst({
+        where: {
+            id: characterId,
+            accountId
+        }
+    });
 
     if (!character) {
         return null;
     }
 
-    return {
-        id: character.id,
-        name: character.name
-    };
+    return toCharacterSummary(character);
 };
 
-export const createCharacterFromSessionToken = (
+export const createCharacterFromSessionToken = async (
     authToken: string,
-    characterName: string
-): CharacterSummary => {
-    const session = getSessionByToken(authToken);
+    characterNameInput: string
+): Promise<CharacterSummary> => {
+    const session = await getValidSessionByToken(authToken);
 
-    if (session === null) {
+    if (!session) {
         throw new Error('Authentication required.');
     }
 
-    return createCharacterForAccount(session.accountId, characterName);
+    const characterName = normalizeCharacterName(characterNameInput);
+
+    if (!isValidCharacterName(characterName)) {
+        throw new Error('Character name must be 3-20 characters.');
+    }
+
+    const duplicate = await prisma.character.findFirst({
+        where: {
+            accountId: session.accountId,
+            name: characterName
+        },
+        select: { id: true }
+    });
+
+    if (duplicate) {
+        throw new Error('Character name already exists in this account.');
+    }
+
+    const character = await prisma.character.create({
+        data: {
+            accountId: session.accountId,
+            name: characterName,
+            tileX: 5,
+            tileY: 5,
+            level: 1,
+            experience: 0
+        }
+    });
+
+    return toCharacterSummary(character);
 };
 
-export const getCharactersFromSessionToken = (
+export const getCharactersFromSessionToken = async (
     authToken: string
-): CharacterSummary[] => {
-    const session = getSessionByToken(authToken);
+): Promise<CharacterSummary[]> => {
+    const session = await getValidSessionByToken(authToken);
 
-    if (session === null) {
+    if (!session) {
         throw new Error('Authentication required.');
     }
 
-    const characters = charactersByAccountId.get(session.accountId) ?? [];
+    const characters = await prisma.character.findMany({
+        where: {
+            accountId: session.accountId
+        },
+        orderBy: {
+            createdAt: 'asc'
+        }
+    });
 
-    return characters.map((character) => ({
-        id: character.id,
-        name: character.name
-    }));
+    return characters.map(toCharacterSummary);
+};
+
+export const persistCharacterProgress = async (
+    characterId: string,
+    payload: {
+        tileX: number;
+        tileY: number;
+        level: number;
+        experience: number;
+    }
+): Promise<void> => {
+    await prisma.character.update({
+        where: { id: characterId },
+        data: {
+            tileX: payload.tileX,
+            tileY: payload.tileY,
+            level: payload.level,
+            experience: payload.experience
+        }
+    });
 };

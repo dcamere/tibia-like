@@ -7,5 +7,6 @@ export const CLIENT_TO_SERVER_MESSAGE = {
 } as const;
 
 export const SERVER_TO_CLIENT_MESSAGE = {
-    CHAT_MESSAGE: 'chat:message'
+    CHAT_MESSAGE: 'chat:message',
+    ANNOUNCEMENT: 'ui:announcement'
 } as const;

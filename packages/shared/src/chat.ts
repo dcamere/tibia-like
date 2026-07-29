@@ -11,6 +11,11 @@ export type ChatMessagePayload = {
     target?: string;
 };
 
+export type AnnouncementPayload = {
+    text: string;
+    from: string;
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> => {
     return typeof value === 'object' && value !== null;
 };
@@ -46,4 +51,17 @@ export const isChatMessagePayload = (
     }
 
     return value.target === undefined || typeof value.target === 'string';
+};
+
+export const isAnnouncementPayload = (
+    value: unknown
+): value is AnnouncementPayload => {
+    if (!isRecord(value)) {
+        return false;
+    }
+
+    return (
+        typeof value.text === 'string' &&
+        typeof value.from === 'string'
+    );
 };

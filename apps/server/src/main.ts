@@ -22,6 +22,7 @@ import {
     loginAccount,
     registerAccount
 } from './auth/AuthService';
+import { prisma } from './db';
 import { WorldRoom } from './rooms/WorldRoom';
 
 const DEFAULT_PORT = 2567;
@@ -126,10 +127,10 @@ const parseCreateCharacterPayload = (
     return body;
 };
 
-authApp.post('/auth/register', (req: Request, res: Response) => {
+authApp.post('/auth/register', async (req: Request, res: Response) => {
     try {
         const payload = parseRegisterPayload(req);
-        const result = registerAccount(
+        const result = await registerAccount(
             payload.username,
             payload.password,
             payload.characterName
@@ -146,10 +147,10 @@ authApp.post('/auth/register', (req: Request, res: Response) => {
     }
 });
 
-authApp.post('/auth/login', (req: Request, res: Response) => {
+authApp.post('/auth/login', async (req: Request, res: Response) => {
     try {
         const payload = parseLoginPayload(req);
-        const result = loginAccount(payload.username, payload.password);
+        const result = await loginAccount(payload.username, payload.password);
 
         res.status(200).json({
             accountId: result.session.accountId,
@@ -162,10 +163,10 @@ authApp.post('/auth/login', (req: Request, res: Response) => {
     }
 });
 
-authApp.post('/characters/create', (req: Request, res: Response) => {
+authApp.post('/characters/create', async (req: Request, res: Response) => {
     try {
         const payload = parseCreateCharacterPayload(req);
-        const character = createCharacterFromSessionToken(
+        const character = await createCharacterFromSessionToken(
             payload.authToken,
             payload.characterName
         );
@@ -180,7 +181,7 @@ authApp.post('/characters/create', (req: Request, res: Response) => {
     }
 });
 
-authApp.get('/characters', (req: Request, res: Response) => {
+authApp.get('/characters', async (req: Request, res: Response) => {
     try {
         const token = req.query.token;
 
@@ -188,7 +189,7 @@ authApp.get('/characters', (req: Request, res: Response) => {
             throw new Error('Missing token query parameter.');
         }
 
-        const characters = getCharactersFromSessionToken(token);
+        const characters = await getCharactersFromSessionToken(token);
 
         const response: AuthCharactersResponse = {
             characters
@@ -210,6 +211,8 @@ const gameServer = new Server({
 
 gameServer.define(WORLD_ROOM_NAME, WorldRoom);
 
+await prisma.$connect();
+
 authApp.listen(authPort, () => {
     console.info(`Auth API listening on http://localhost:${authPort}`);
 });
@@ -217,3 +220,16 @@ authApp.listen(authPort, () => {
 await gameServer.listen(port);
 
 console.info(`Colyseus listening on ws://localhost:${port}`);
+
+const shutdown = async (): Promise<void> => {
+    await prisma.$disconnect();
+    process.exit(0);
+};
+
+process.once('SIGINT', () => {
+    void shutdown();
+});
+
+process.once('SIGTERM', () => {
+    void shutdown();
+});

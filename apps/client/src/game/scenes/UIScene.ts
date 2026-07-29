@@ -12,6 +12,7 @@ const MAX_CHAT_LOG_LINES = 8;
 export class UIScene extends Scene {
     private combatLogText: GameObjects.Text | null = null;
     private chatLogText: GameObjects.Text | null = null;
+    private announcementText: GameObjects.Text | null = null;
 
     private readonly combatLogLines: string[] = [];
     private readonly chatLogLines: string[] = [];
@@ -24,6 +25,7 @@ export class UIScene extends Scene {
         this.createInstructions();
         this.createCombatLog();
         this.createChatLog();
+        this.createAnnouncementBanner();
     }
 
     public logMessage(message: string): void {
@@ -52,6 +54,27 @@ export class UIScene extends Scene {
         }
 
         this.chatLogText.setText(this.chatLogLines.join('\n'));
+    }
+
+    public showAnnouncement(from: string, text: string): void {
+        if (this.announcementText === null) {
+            return;
+        }
+
+        this.announcementText.setText(`[${from}] ${text}`);
+        this.announcementText.setAlpha(1);
+        this.announcementText.setVisible(true);
+
+        this.tweens.killTweensOf(this.announcementText);
+        this.tweens.add({
+            targets: this.announcementText,
+            alpha: 0,
+            duration: 2600,
+            ease: 'Quad.Out',
+            onComplete: () => {
+                this.announcementText?.setVisible(false);
+            }
+        });
     }
 
     private createInstructions(): void {
@@ -108,5 +131,26 @@ export class UIScene extends Scene {
             .setDepth(1000);
 
         this.chatLogText.setText(this.chatLogLines.join('\n'));
+    }
+
+    private createAnnouncementBanner(): void {
+        this.announcementText = this.add
+            .text(this.scale.width / 2, 48, '', {
+                fontFamily: 'Georgia',
+                fontSize: '32px',
+                color: '#fff1b8',
+                stroke: '#1a1207',
+                strokeThickness: 8,
+                backgroundColor: '#2a1a0fcc',
+                padding: {
+                    x: 16,
+                    y: 10
+                },
+                align: 'center'
+            })
+            .setOrigin(0.5)
+            .setDepth(1100)
+            .setVisible(false)
+            .setAlpha(0);
     }
 }

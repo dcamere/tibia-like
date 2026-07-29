@@ -9,6 +9,10 @@ export type AuthCredentials = {
 export type CharacterSummary = {
     id: CharacterId;
     name: string;
+    tileX: number;
+    tileY: number;
+    level: number;
+    experience: number;
 };
 
 export type AuthRegisterInput = AuthCredentials & {

@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: tibia_like_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tibia_like
+    ports:
+      - "5432:5432"
+    volumes:
+      - tibia_like_pgdata:/var/lib/postgresql/data
+
+volumes:
+  tibia_like_pgdata:
