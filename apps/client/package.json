@@ -26,6 +26,8 @@
     "vite": "^6.3.1"
   },
   "dependencies": {
+    "@tibia-like/shared": "workspace:*",
+    "colyseus.js": "^0.16.22",
     "phaser": "4.0.0",
     "terser": "^5.39.0"
   }

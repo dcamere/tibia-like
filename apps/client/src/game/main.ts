@@ -1,4 +1,5 @@
 import { Game as MainGame } from './scenes/Game';
+import { UIScene } from './scenes/UIScene';
 import { AUTO, Game, Scale,Types } from 'phaser';
 
 // Find out more information about the Game Config at:
@@ -14,7 +15,8 @@ const config: Types.Core.GameConfig = {
         autoCenter: Scale.CENTER_BOTH
     },
     scene: [
-        MainGame
+        MainGame,
+        UIScene
     ]
 };
 

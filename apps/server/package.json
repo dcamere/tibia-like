@@ -1,0 +1,23 @@
+{
+  "name": "@tibia-like/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@colyseus/core": "0.16.22",
+    "@colyseus/schema": "^3.0.69",
+    "@colyseus/ws-transport": "0.16.5",
+    "@tibia-like/shared": "workspace:*",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "tsx": "^4.23.1",
+    "typescript": "~5.7.3"
+  }
+}

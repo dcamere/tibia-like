@@ -1,7 +1,6 @@
-export type TilePosition = {
-    tileX: number;
-    tileY: number;
-};
+import { TilePosition } from '@tibia-like/shared';
+
+export type { TilePosition };
 
 export type WorldPosition = {
     x: number;
