@@ -1,6 +1,9 @@
-import { ContainerType, type Prisma } from '@prisma/client';
+import { type Prisma } from '@prisma/client';
 
 import { prisma } from '../db';
+
+const CONTAINER_INVENTORY = 'inventory';
+const CONTAINER_EQUIPMENT = 'equipment';
 
 export type InventoryEntry = {
     slug: string;
@@ -44,15 +47,15 @@ const ensureDefaultContainers = async (
         select: { type: true }
     });
 
-    const hasInventory = existing.some((entry) => entry.type === ContainerType.inventory);
-    const hasEquipment = existing.some((entry) => entry.type === ContainerType.equipment);
+    const hasInventory = existing.some((entry) => entry.type === CONTAINER_INVENTORY);
+    const hasEquipment = existing.some((entry) => entry.type === CONTAINER_EQUIPMENT);
 
     if (!hasInventory) {
         await tx.container.create({
             data: {
                 characterId,
                 name: 'Inventory',
-                type: ContainerType.inventory,
+                type: CONTAINER_INVENTORY,
                 capacity: 24
             }
         });
@@ -63,7 +66,7 @@ const ensureDefaultContainers = async (
             data: {
                 characterId,
                 name: 'Equipment',
-                type: ContainerType.equipment,
+                type: CONTAINER_EQUIPMENT,
                 capacity: 10
             }
         });
@@ -79,7 +82,7 @@ const getInventoryContainer = async (
     const container = await tx.container.findFirst({
         where: {
             characterId,
-            type: ContainerType.inventory
+            type: CONTAINER_INVENTORY
         }
     });
 
@@ -209,7 +212,7 @@ const consumeInventoryQuantity = async (
             itemDefinitionId,
             equippedSlot: null,
             container: {
-                type: ContainerType.inventory
+                type: CONTAINER_INVENTORY
             }
         },
         orderBy: {
@@ -299,7 +302,7 @@ export const listInventory = async (
             characterId,
             equippedSlot: null,
             container: {
-                type: ContainerType.inventory
+                type: CONTAINER_INVENTORY
             }
         },
         include: {
