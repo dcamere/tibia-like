@@ -41,6 +41,9 @@ export default defineConfig({
     server: {
         port: 8080
     },
+    preview: {
+        allowedHosts: ['tibia-likeclient-production.up.railway.app']
+    },
     plugins: [
         phasermsg()
     ]
