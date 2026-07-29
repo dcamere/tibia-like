@@ -1,0 +1,12 @@
+{
+  "name": "tibia-like",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --parallel --recursive dev",
+    "build": "pnpm --recursive build",
+    "typecheck": "pnpm --recursive typecheck"
+  },
+  "packageManager": "pnpm@11.17.0"
+}
