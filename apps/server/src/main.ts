@@ -1,5 +1,6 @@
 import { Server } from '@colyseus/core';
 import { WebSocketTransport } from '@colyseus/ws-transport';
+import { createServer } from 'node:http';
 import express, {
     type NextFunction,
     type Request,
@@ -26,7 +27,6 @@ import { prisma } from './db';
 import { WorldRoom } from './rooms/WorldRoom';
 
 const DEFAULT_PORT = 2567;
-const DEFAULT_AUTH_PORT = 3567;
 
 const parsePort = (
     value: string | undefined,
@@ -42,9 +42,9 @@ const parsePort = (
 };
 
 const port = parsePort(process.env.PORT, DEFAULT_PORT);
-const authPort = parsePort(process.env.AUTH_PORT, DEFAULT_AUTH_PORT);
 
 const authApp = express();
+const httpServer = createServer(authApp);
 
 authApp.use(express.json());
 
@@ -206,19 +206,18 @@ authApp.get('/health', (_req: Request, res: Response) => {
 });
 
 const gameServer = new Server({
-    transport: new WebSocketTransport({})
+    transport: new WebSocketTransport({
+        server: httpServer
+    })
 });
 
 gameServer.define(WORLD_ROOM_NAME, WorldRoom);
 
 await prisma.$connect();
 
-authApp.listen(authPort, () => {
-    console.info(`Auth API listening on http://localhost:${authPort}`);
-});
-
 await gameServer.listen(port);
 
+console.info(`Auth API listening on http://localhost:${port}`);
 console.info(`Colyseus listening on ws://localhost:${port}`);
 
 const shutdown = async (): Promise<void> => {

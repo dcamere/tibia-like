@@ -2493,7 +2493,7 @@ export class Game extends Scene {
 
         const protocol = window.location.protocol === 'https:' ? 'https' : 'http';
 
-        return `${protocol}://${window.location.hostname}:3567`;
+        return `${protocol}://${window.location.hostname}:2567`;
     }
 
     private async requestLogin(
