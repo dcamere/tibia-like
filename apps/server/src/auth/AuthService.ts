@@ -2,7 +2,6 @@ import { randomBytes } from 'node:crypto';
 
 import { verify, hash } from '@node-rs/argon2';
 import {
-    AccountRole,
     type Character,
     type Prisma,
     type Session
@@ -20,6 +19,7 @@ export type AuthSession = {
 };
 
 export type CharacterSelection = CharacterSummary;
+type AccountRole = 'player' | 'gm';
 
 const MIN_USERNAME_LENGTH = 3;
 const MAX_USERNAME_LENGTH = 20;
@@ -72,7 +72,7 @@ const createToken = (): string => {
 };
 
 const toRole = (role: AccountRole): 'player' | 'gm' => {
-    return role === AccountRole.gm ? 'gm' : 'player';
+    return role === 'gm' ? 'gm' : 'player';
 };
 
 const toCharacterSummary = (character: Character): CharacterSummary => {
@@ -96,10 +96,10 @@ const resolveAccountRole = (normalizedUsername: string): AccountRole => {
     const gmUsernames = new Set<string>(['ekkel', ...fromEnv]);
 
     if (normalizedUsername.startsWith('gm_') || gmUsernames.has(normalizedUsername)) {
-        return AccountRole.gm;
+        return 'gm';
     }
 
-    return AccountRole.player;
+    return 'player';
 };
 
 const createSession = async (accountId: string): Promise<string> => {

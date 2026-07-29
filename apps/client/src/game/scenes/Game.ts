@@ -408,6 +408,14 @@ export class Game extends Scene {
 
         if (tileType === TileType.Road) {
             fillColor = alternate ? 0x8c7a62 : 0x97846b;
+        } else if (tileType === TileType.Water) {
+            fillColor = alternate ? 0x1d4e89 : 0x1f5f9e;
+        } else if (tileType === TileType.Bridge) {
+            fillColor = alternate ? 0x7a5633 : 0x876140;
+        } else if (tileType === TileType.Garden) {
+            fillColor = alternate ? 0x2f7a44 : 0x3a8750;
+        } else if (tileType === TileType.HouseFloor) {
+            fillColor = alternate ? 0xa88b67 : 0xb59670;
         }
 
         return this.add
@@ -436,10 +444,52 @@ export class Game extends Scene {
             case TileType.Rock:
                 return this.createRock(tileX, tileY);
 
+            case TileType.Fence:
+                return this.createFence(tileX, tileY);
+
+            case TileType.LampPost:
+                return this.createLampPost(tileX, tileY);
+
+            case TileType.Fountain:
+                return this.createFountain(tileX, tileY);
+
+            case TileType.MarketStall:
+                return this.createMarketStall(tileX, tileY);
+
+            case TileType.HouseRoof:
+                return this.createHouseRoof(tileX, tileY);
+
+            case TileType.Statue:
+                return this.createStatue(tileX, tileY);
+
+            case TileType.Banner:
+                return this.createBanner(tileX, tileY);
+
+            case TileType.Crate:
+                return this.createCrate(tileX, tileY);
+
+            case TileType.Bush:
+                return this.createBush(tileX, tileY);
+
+            case TileType.Flower:
+                return this.createFlower(tileX, tileY);
+
             case TileType.Grass:
                 return null;
 
             case TileType.Road:
+                return null;
+
+            case TileType.Water:
+                return null;
+
+            case TileType.Bridge:
+                return null;
+
+            case TileType.Garden:
+                return null;
+
+            case TileType.HouseFloor:
                 return null;
 
             default:
@@ -476,6 +526,90 @@ export class Game extends Scene {
             .ellipse(position.x, position.y, TILE_SIZE - 6, TILE_SIZE - 12, 0x7b7f84)
             .setStrokeStyle(2, 0x414449)
             .setDepth(5);
+    }
+
+    private createFence(tileX: number, tileY: number): GameObjects.Rectangle {
+        const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
+
+        return this.add
+            .rectangle(position.x, position.y, TILE_SIZE - 8, 6, 0xc8a96d)
+            .setStrokeStyle(1, 0x6f4f28)
+            .setDepth(6);
+    }
+
+    private createLampPost(tileX: number, tileY: number): GameObjects.Container {
+        const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
+        const pole = this.add.rectangle(0, 4, 4, 18, 0x3a2a1b);
+        const light = this.add.circle(0, -6, 4, 0xffe29a).setStrokeStyle(1, 0x8a6a2a);
+
+        return this.add.container(position.x, position.y, [pole, light]).setDepth(7);
+    }
+
+    private createFountain(tileX: number, tileY: number): GameObjects.Container {
+        const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
+        const basin = this.add.circle(0, 0, 11, 0x94a3b8).setStrokeStyle(2, 0x475569);
+        const water = this.add.circle(0, 0, 7, 0x3b82f6).setStrokeStyle(1, 0x1d4ed8);
+
+        return this.add.container(position.x, position.y, [basin, water]).setDepth(7);
+    }
+
+    private createMarketStall(tileX: number, tileY: number): GameObjects.Container {
+        const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
+        const base = this.add.rectangle(0, 5, 16, 10, 0x7c5a2e).setStrokeStyle(1, 0x4d3416);
+        const canopy = this.add.rectangle(0, -4, 18, 8, 0xd33a2c).setStrokeStyle(1, 0x7f1d1d);
+
+        return this.add.container(position.x, position.y, [base, canopy]).setDepth(7);
+    }
+
+    private createHouseRoof(tileX: number, tileY: number): GameObjects.Rectangle {
+        const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
+
+        return this.add
+            .rectangle(position.x, position.y, TILE_SIZE, TILE_SIZE, 0x9b3d2f)
+            .setStrokeStyle(1, 0x4a1d17)
+            .setDepth(6);
+    }
+
+    private createStatue(tileX: number, tileY: number): GameObjects.Container {
+        const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
+        const pedestal = this.add.rectangle(0, 6, 12, 8, 0x64748b);
+        const statue = this.add.rectangle(0, -2, 8, 12, 0x94a3b8);
+
+        return this.add.container(position.x, position.y, [pedestal, statue]).setDepth(7);
+    }
+
+    private createBanner(tileX: number, tileY: number): GameObjects.Container {
+        const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
+        const pole = this.add.rectangle(-4, 2, 2, 16, 0x3a2a1b);
+        const cloth = this.add.rectangle(3, -2, 10, 8, 0xb91c1c).setStrokeStyle(1, 0x7f1d1d);
+
+        return this.add.container(position.x, position.y, [pole, cloth]).setDepth(7);
+    }
+
+    private createCrate(tileX: number, tileY: number): GameObjects.Rectangle {
+        const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
+
+        return this.add
+            .rectangle(position.x, position.y, 12, 12, 0x9a6b3a)
+            .setStrokeStyle(1, 0x5a3a1a)
+            .setDepth(7);
+    }
+
+    private createBush(tileX: number, tileY: number): GameObjects.Arc {
+        const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
+
+        return this.add
+            .circle(position.x, position.y, 9, 0x2f855a)
+            .setStrokeStyle(1, 0x1f5d3c)
+            .setDepth(6);
+    }
+
+    private createFlower(tileX: number, tileY: number): GameObjects.Container {
+        const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
+        const stem = this.add.rectangle(0, 2, 2, 8, 0x166534);
+        const bloom = this.add.circle(0, -3, 3, 0xf472b6).setStrokeStyle(1, 0xbe185d);
+
+        return this.add.container(position.x, position.y, [stem, bloom]).setDepth(6);
     }
 
     private createSystems(): void {

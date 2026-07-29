@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "pnpm --parallel --recursive dev",
     "build": "pnpm --recursive build",
-    "typecheck": "pnpm --recursive typecheck"
+    "typecheck": "pnpm --recursive typecheck",
+    "start:server": "set PORT=2567&& set AUTH_PORT=3567&& pnpm --filter @tibia-like/server start",
+    "start:client": "set VITE_SERVER_URL=http://localhost:2567&& set VITE_AUTH_URL=http://localhost:3567&& pnpm --filter @tibia-like/client dev-nolog",
+    "start:all": "set PORT=2567&& set AUTH_PORT=3567&& set VITE_SERVER_URL=http://localhost:2567&& set VITE_AUTH_URL=http://localhost:3567&& pnpm --parallel --recursive --filter @tibia-like/server --filter @tibia-like/client local"
   },
   "packageManager": "pnpm@11.17.0"
 }
