@@ -139,6 +139,11 @@ type GroundItemVisual = {
     homeY: number;
 };
 
+type WorldChunkVisual = {
+    key: string;
+    objects: GameObjects.GameObject[];
+};
+
 type InventoryUiSlotRefs = {
     inventorySlots: HTMLDivElement;
     groundSlots: HTMLDivElement;
@@ -174,6 +179,8 @@ export class Game extends Scene {
     private readonly knownCreatureAliveById = new Map<string, boolean>();
     private readonly groundItemVisuals = new Map<string, GroundItemVisual>();
     private readonly groundItemsById = new Map<string, WorldGroundItemState>();
+    private readonly fogTilesByKey = new Map<string, GameObjects.Rectangle>();
+    private readonly renderedWorldChunks = new Map<string, WorldChunkVisual>();
 
     private inventoryItems: InventoryEntry[] = [];
     private inventoryGoldCopper = 0;
@@ -189,6 +196,9 @@ export class Game extends Scene {
     private readonly moveCooldownMs = 120;
     private readonly attackCooldownMs = 500;
     private readonly movementDurationMs = 100;
+    private readonly fogRevealRadiusInTiles = 5;
+    private readonly chunkSizeInTiles = 10;
+    private readonly chunkRenderRadius = 2;
 
     constructor() {
         super('Game');
@@ -224,15 +234,6 @@ export class Game extends Scene {
     private createWorld(): void {
         this.cameras.main.setBackgroundColor('#16211b');
 
-        for (let tileY = 0; tileY < MAP_HEIGHT_IN_TILES; tileY += 1) {
-            for (let tileX = 0; tileX < MAP_WIDTH_IN_TILES; tileX += 1) {
-                const tileType = WORLD_MAP[tileY][tileX];
-
-                this.createGroundTile(tileX, tileY);
-                this.createTileObject(tileX, tileY, tileType);
-            }
-        }
-
         this.add
             .rectangle(
                 WORLD_WIDTH / 2,
@@ -241,13 +242,165 @@ export class Game extends Scene {
                 WORLD_HEIGHT
             )
             .setStrokeStyle(4, 0x111111);
+
+        this.updateVisibleWorldChunks(5, 5);
     }
 
-    private createGroundTile(tileX: number, tileY: number): void {
+    private updateVisibleWorldChunks(centerTileX: number, centerTileY: number): void {
+        const centerChunkX = Math.floor(centerTileX / this.chunkSizeInTiles);
+        const centerChunkY = Math.floor(centerTileY / this.chunkSizeInTiles);
+        const visibleKeys = new Set<string>();
+
+        for (
+            let chunkY = centerChunkY - this.chunkRenderRadius;
+            chunkY <= centerChunkY + this.chunkRenderRadius;
+            chunkY += 1
+        ) {
+            for (
+                let chunkX = centerChunkX - this.chunkRenderRadius;
+                chunkX <= centerChunkX + this.chunkRenderRadius;
+                chunkX += 1
+            ) {
+                if (!this.isChunkInsideWorld(chunkX, chunkY)) {
+                    continue;
+                }
+
+                const key = this.chunkKey(chunkX, chunkY);
+                visibleKeys.add(key);
+
+                if (!this.renderedWorldChunks.has(key)) {
+                    this.renderWorldChunk(chunkX, chunkY);
+                }
+            }
+        }
+
+        for (const [key, chunkVisual] of this.renderedWorldChunks.entries()) {
+            if (visibleKeys.has(key)) {
+                continue;
+            }
+
+            for (const object of chunkVisual.objects) {
+                object.destroy();
+            }
+
+            this.renderedWorldChunks.delete(key);
+        }
+    }
+
+    private renderWorldChunk(chunkX: number, chunkY: number): void {
+        const key = this.chunkKey(chunkX, chunkY);
+        const objects: GameObjects.GameObject[] = [];
+        const startTileX = chunkX * this.chunkSizeInTiles;
+        const startTileY = chunkY * this.chunkSizeInTiles;
+        const endTileX = Math.min(startTileX + this.chunkSizeInTiles, MAP_WIDTH_IN_TILES);
+        const endTileY = Math.min(startTileY + this.chunkSizeInTiles, MAP_HEIGHT_IN_TILES);
+
+        for (let tileY = startTileY; tileY < endTileY; tileY += 1) {
+            for (let tileX = startTileX; tileX < endTileX; tileX += 1) {
+                const tileType = WORLD_MAP[tileY][tileX];
+                const groundTile = this.createGroundTile(tileX, tileY);
+                objects.push(groundTile);
+
+                const tileObject = this.createTileObject(tileX, tileY, tileType);
+
+                if (tileObject) {
+                    objects.push(tileObject);
+                }
+            }
+        }
+
+        this.renderedWorldChunks.set(key, {
+            key,
+            objects
+        });
+    }
+
+    private isChunkInsideWorld(chunkX: number, chunkY: number): boolean {
+        const maxChunkX = Math.ceil(MAP_WIDTH_IN_TILES / this.chunkSizeInTiles) - 1;
+        const maxChunkY = Math.ceil(MAP_HEIGHT_IN_TILES / this.chunkSizeInTiles) - 1;
+
+        return chunkX >= 0 && chunkY >= 0 && chunkX <= maxChunkX && chunkY <= maxChunkY;
+    }
+
+    private chunkKey(chunkX: number, chunkY: number): string {
+        return `${chunkX}:${chunkY}`;
+    }
+
+    private createFogOfWarLayer(): void {
+        this.clearFogOfWarLayer();
+
+        for (let tileY = 0; tileY < MAP_HEIGHT_IN_TILES; tileY += 1) {
+            for (let tileX = 0; tileX < MAP_WIDTH_IN_TILES; tileX += 1) {
+                const key = `${tileX}:${tileY}`;
+                const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
+
+                const fogTile = this.add
+                    .rectangle(
+                        position.x,
+                        position.y,
+                        TILE_SIZE,
+                        TILE_SIZE,
+                        0x020617,
+                        0.92
+                    )
+                    .setDepth(25);
+
+                this.fogTilesByKey.set(key, fogTile);
+            }
+        }
+    }
+
+    private clearFogOfWarLayer(): void {
+        for (const fogTile of this.fogTilesByKey.values()) {
+            fogTile.destroy();
+        }
+
+        this.fogTilesByKey.clear();
+    }
+
+    private revealFogAround(tileX: number, tileY: number): void {
+        const radius = this.fogRevealRadiusInTiles;
+
+        for (let offsetY = -radius; offsetY <= radius; offsetY += 1) {
+            for (let offsetX = -radius; offsetX <= radius; offsetX += 1) {
+                const targetX = tileX + offsetX;
+                const targetY = tileY + offsetY;
+
+                if (
+                    targetX < 0 ||
+                    targetY < 0 ||
+                    targetX >= MAP_WIDTH_IN_TILES ||
+                    targetY >= MAP_HEIGHT_IN_TILES
+                ) {
+                    continue;
+                }
+
+                const key = `${targetX}:${targetY}`;
+                const fogTile = this.fogTilesByKey.get(key);
+
+                if (!fogTile) {
+                    continue;
+                }
+
+                if (fogTile.alpha <= 0.05) {
+                    continue;
+                }
+
+                this.tweens.add({
+                    targets: fogTile,
+                    alpha: 0,
+                    duration: 180,
+                    ease: 'Linear'
+                });
+            }
+        }
+    }
+
+    private createGroundTile(tileX: number, tileY: number): GameObjects.Rectangle {
         const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
         const alternate = (tileX + tileY) % 2 === 0;
 
-        this.add
+        return this.add
             .rectangle(
                 position.x,
                 position.y,
@@ -258,52 +411,55 @@ export class Game extends Scene {
             .setStrokeStyle(1, 0x29472f, 0.45);
     }
 
-    private createTileObject(tileX: number, tileY: number, tileType: TileType): void {
+    private createTileObject(
+        tileX: number,
+        tileY: number,
+        tileType: TileType
+    ): GameObjects.GameObject | null {
         switch (tileType) {
             case TileType.Wall:
-                this.createWall(tileX, tileY);
-                break;
+                return this.createWall(tileX, tileY);
 
             case TileType.Tree:
-                this.createTree(tileX, tileY);
-                break;
+                return this.createTree(tileX, tileY);
 
             case TileType.Rock:
-                this.createRock(tileX, tileY);
-                break;
+                return this.createRock(tileX, tileY);
 
             case TileType.Grass:
-                break;
+                return null;
 
             default:
                 console.warn(`Unknown tile type ${tileType} at ${tileX},${tileY}`);
+                return null;
         }
     }
 
-    private createWall(tileX: number, tileY: number): void {
+    private createWall(tileX: number, tileY: number): GameObjects.Rectangle {
         const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
 
-        this.add
+        return this.add
             .rectangle(position.x, position.y, TILE_SIZE, TILE_SIZE, 0x806044)
             .setStrokeStyle(2, 0x3d291c)
             .setDepth(5);
     }
 
-    private createTree(tileX: number, tileY: number): void {
+    private createTree(tileX: number, tileY: number): GameObjects.Container {
         const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
 
-        this.add.rectangle(position.x, position.y + 8, 8, 16, 0x68421f).setDepth(5);
-
-        this.add
-            .circle(position.x, position.y - 3, 13, 0x1f7a35)
+        const trunk = this.add.rectangle(0, 8, 8, 16, 0x68421f).setDepth(5);
+        const crown = this.add
+            .circle(0, -3, 13, 0x1f7a35)
             .setStrokeStyle(2, 0x124d22)
             .setDepth(6);
+
+        return this.add.container(position.x, position.y, [trunk, crown]).setDepth(6);
     }
 
-    private createRock(tileX: number, tileY: number): void {
+    private createRock(tileX: number, tileY: number): GameObjects.Ellipse {
         const position = tileToWorldPosition(tileX, tileY, TILE_SIZE);
 
-        this.add
+        return this.add
             .ellipse(position.x, position.y, TILE_SIZE - 6, TILE_SIZE - 12, 0x7b7f84)
             .setStrokeStyle(2, 0x414449)
             .setDepth(5);
@@ -1727,6 +1883,9 @@ export class Game extends Scene {
     }
 
     private syncLocalPlayerFromServer(playerState: WorldPlayerState): void {
+        this.updateVisibleWorldChunks(playerState.tileX, playerState.tileY);
+        this.revealFogAround(playerState.tileX, playerState.tileY);
+
         if (!this.hasAppliedServerSpawn) {
             this.player.moveTo(playerState.tileX, playerState.tileY, 0);
             this.hasAppliedServerSpawn = true;
@@ -1754,6 +1913,8 @@ export class Game extends Scene {
         this.createSystems();
         this.createWorld();
         this.createPlayer(this.localPlayerName);
+        this.createFogOfWarLayer();
+        this.revealFogAround(this.player.tileX, this.player.tileY);
         this.createKeyboardControls();
         this.createCombatControls();
         this.configureCamera();
@@ -1773,6 +1934,8 @@ export class Game extends Scene {
             this.inventoryUiRoot = null;
             this.inventoryUiSlots = null;
             this.isInventoryWindowOpen = false;
+            this.clearFogOfWarLayer();
+            this.clearRenderedWorldChunks();
             void this.leaveWorldRoom();
         });
 
@@ -2637,6 +2800,16 @@ export class Game extends Scene {
         this.groundItemVisuals.clear();
         this.groundItemsById.clear();
         this.refreshInventoryPanel();
+    }
+
+    private clearRenderedWorldChunks(): void {
+        for (const chunk of this.renderedWorldChunks.values()) {
+            for (const object of chunk.objects) {
+                object.destroy();
+            }
+        }
+
+        this.renderedWorldChunks.clear();
     }
 
     private refreshInventoryPanel(): void {
