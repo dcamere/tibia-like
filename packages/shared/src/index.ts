@@ -1,6 +1,7 @@
 export * from './direction';
 export * from './creature';
 export * from './chat';
+export * from './inventory';
 export * from './entity';
 export * from './auth';
 export * from './input';

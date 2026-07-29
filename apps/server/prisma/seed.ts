@@ -3,6 +3,18 @@ import { prisma } from '../src/db';
 const seed = async (): Promise<void> => {
     const definitions = [
         {
+            slug: 'copper_coin',
+            name: 'Copper Coin',
+            stackable: true,
+            maxStack: 100
+        },
+        {
+            slug: 'silver_coin',
+            name: 'Silver Coin',
+            stackable: true,
+            maxStack: 100
+        },
+        {
             slug: 'gold_coin',
             name: 'Gold Coin',
             stackable: true,

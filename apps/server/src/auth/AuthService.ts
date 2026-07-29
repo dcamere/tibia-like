@@ -81,7 +81,8 @@ const toCharacterSummary = (character: Character): CharacterSummary => {
         tileX: character.tileX,
         tileY: character.tileY,
         level: character.level,
-        experience: character.experience
+        experience: character.experience,
+        goldCopper: character.goldCopper
     };
 };
 
@@ -201,7 +202,8 @@ export const registerAccount = async (
                 tileX: 5,
                 tileY: 5,
                 level: 1,
-                experience: 0
+                experience: 0,
+                goldCopper: 0
             }
         });
 
@@ -336,7 +338,8 @@ export const createCharacterFromSessionToken = async (
             tileX: 5,
             tileY: 5,
             level: 1,
-            experience: 0
+            experience: 0,
+            goldCopper: 0
         }
     });
 
@@ -371,6 +374,7 @@ export const persistCharacterProgress = async (
         tileY: number;
         level: number;
         experience: number;
+        goldCopper: number;
     }
 ): Promise<void> => {
     await prisma.character.update({
@@ -379,7 +383,8 @@ export const persistCharacterProgress = async (
             tileX: payload.tileX,
             tileY: payload.tileY,
             level: payload.level,
-            experience: payload.experience
+            experience: payload.experience,
+            goldCopper: payload.goldCopper
         }
     });
 };

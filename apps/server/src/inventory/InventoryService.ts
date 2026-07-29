@@ -14,7 +14,26 @@ export type GroundEntry = {
     quantity: number;
 };
 
+export type GroundItemSnapshot = {
+    id: string;
+    slug: string;
+    name: string;
+    tileX: number;
+    tileY: number;
+    quantity: number;
+};
+
 const PLAYER_PICKUP_RANGE = 1;
+
+const COIN_VALUE_BY_SLUG: Record<string, number> = {
+    copper_coin: 1,
+    silver_coin: 100,
+    gold_coin: 10_000
+};
+
+const resolveCoinValue = (slug: string): number | null => {
+    return COIN_VALUE_BY_SLUG[slug] ?? null;
+};
 
 const ensureDefaultContainers = async (
     tx: Prisma.TransactionClient,
@@ -87,6 +106,21 @@ const addItemToInventory = async (
 
     if (!itemDefinition) {
         throw new Error('Item definition not found.');
+    }
+
+    const coinValue = resolveCoinValue(itemDefinition.slug);
+
+    if (coinValue !== null) {
+        await tx.character.update({
+            where: { id: characterId },
+            data: {
+                goldCopper: {
+                    increment: coinValue * quantity
+                }
+            }
+        });
+
+        return;
     }
 
     const inventoryContainer = await getInventoryContainer(tx, characterId);
@@ -317,6 +351,24 @@ export const listGroundItemsAt = async (
     }));
 };
 
+export const listAllGroundItems = async (): Promise<GroundItemSnapshot[]> => {
+    const items = await prisma.groundItem.findMany({
+        include: {
+            itemDefinition: true
+        },
+        orderBy: [{ tileY: 'asc' }, { tileX: 'asc' }, { createdAt: 'asc' }]
+    });
+
+    return items.map((item) => ({
+        id: item.id,
+        slug: item.itemDefinition.slug,
+        name: item.itemDefinition.name,
+        tileX: item.tileX,
+        tileY: item.tileY,
+        quantity: item.quantity
+    }));
+};
+
 export const giveItemToCharacter = async (
     characterId: string,
     slug: string,
@@ -341,6 +393,37 @@ export const giveItemToCharacter = async (
     });
 };
 
+const removeCurrencyForCoinDrop = async (
+    tx: Prisma.TransactionClient,
+    characterId: string,
+    coinValue: number,
+    quantity: number
+): Promise<void> => {
+    const costCopper = coinValue * quantity;
+
+    const character = await tx.character.findUnique({
+        where: { id: characterId },
+        select: { goldCopper: true }
+    });
+
+    if (!character) {
+        throw new Error('Character not found.');
+    }
+
+    if (character.goldCopper < costCopper) {
+        throw new Error('Not enough gold.');
+    }
+
+    await tx.character.update({
+        where: { id: characterId },
+        data: {
+            goldCopper: {
+                decrement: costCopper
+            }
+        }
+    });
+};
+
 export const dropItemFromCharacter = async (
     characterId: string,
     slug: string,
@@ -361,6 +444,19 @@ export const dropItemFromCharacter = async (
 
         if (!itemDefinition) {
             throw new Error('Item definition not found.');
+        }
+
+        const coinValue = resolveCoinValue(itemDefinition.slug);
+
+        if (coinValue !== null) {
+            await removeCurrencyForCoinDrop(tx, characterId, coinValue, quantity);
+            await upsertGroundItem(tx, {
+                itemDefinitionId: itemDefinition.id,
+                tileX,
+                tileY,
+                quantity
+            });
+            return;
         }
 
         await consumeInventoryQuantity(tx, characterId, itemDefinition.id, quantity);
@@ -433,6 +529,36 @@ export const pickupGroundItemForCharacter = async (
             });
         }
 
+        const coinValue = resolveCoinValue(groundItem.itemDefinition.slug);
+
+        if (coinValue !== null) {
+            await tx.character.update({
+                where: { id: input.characterId },
+                data: {
+                    goldCopper: {
+                        increment: coinValue * input.quantity
+                    }
+                }
+            });
+
+            return;
+        }
+
         await addItemToInventory(tx, input.characterId, groundItem.itemDefinitionId, input.quantity);
     });
+};
+
+export const getCharacterGoldCopper = async (characterId: string): Promise<number> => {
+    const character = await prisma.character.findUnique({
+        where: { id: characterId },
+        select: {
+            goldCopper: true
+        }
+    });
+
+    if (!character) {
+        throw new Error('Character not found.');
+    }
+
+    return character.goldCopper;
 };

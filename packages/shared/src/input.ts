@@ -37,3 +37,51 @@ export const isAttackInput = (value: unknown): value is AttackInput => {
 
     return typeof value.creatureId === 'string';
 };
+
+export type DropItemInput = {
+    slug: string;
+    quantity: number;
+    targetTileX?: number;
+    targetTileY?: number;
+};
+
+export const isDropItemInput = (value: unknown): value is DropItemInput => {
+    if (!isRecord(value)) {
+        return false;
+    }
+
+    return (
+        typeof value.slug === 'string' &&
+        typeof value.quantity === 'number' &&
+        Number.isFinite(value.quantity) &&
+        (value.targetTileX === undefined ||
+            (typeof value.targetTileX === 'number' && Number.isFinite(value.targetTileX))) &&
+        (value.targetTileY === undefined ||
+            (typeof value.targetTileY === 'number' && Number.isFinite(value.targetTileY)))
+    );
+};
+
+export type PickupItemInput = {
+    slug: string;
+    quantity: number;
+    targetTileX?: number;
+    targetTileY?: number;
+};
+
+export const isPickupItemInput = (
+    value: unknown
+): value is PickupItemInput => {
+    if (!isRecord(value)) {
+        return false;
+    }
+
+    return (
+        typeof value.slug === 'string' &&
+        typeof value.quantity === 'number' &&
+        Number.isFinite(value.quantity) &&
+        (value.targetTileX === undefined ||
+            (typeof value.targetTileX === 'number' && Number.isFinite(value.targetTileX))) &&
+        (value.targetTileY === undefined ||
+            (typeof value.targetTileY === 'number' && Number.isFinite(value.targetTileY)))
+    );
+};

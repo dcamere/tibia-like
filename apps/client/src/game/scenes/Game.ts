@@ -9,10 +9,16 @@ import {
     type ChatSendInput,
     type CharacterSummary,
     CLIENT_TO_SERVER_MESSAGE,
+    type DropItemInput,
     type Direction,
+    type InventoryEntry,
     isAnnouncementPayload,
     isChatMessagePayload,
     isChatSendInput,
+    isDropItemInput,
+    isInventorySyncPayload,
+    isPickupItemInput,
+    type PickupItemInput,
     SERVER_TO_CLIENT_MESSAGE,
     WORLD_ROOM_NAME,
     type AttackInput,
@@ -50,6 +56,7 @@ type WorldPlayerState = {
     tileY: number;
     level: number;
     experience: number;
+    goldCopper: number;
 };
 
 type WorldCreatureState = {
@@ -68,6 +75,16 @@ type WorldCreatureState = {
 type WorldRoomState = {
     players: unknown;
     creatures: unknown;
+    groundItems: unknown;
+};
+
+type WorldGroundItemState = {
+    id: string;
+    slug: string;
+    name: string;
+    tileX: number;
+    tileY: number;
+    quantity: number;
 };
 
 type RawMatchmakeResponse = {
@@ -111,6 +128,24 @@ type NetworkPlayerVisual = {
     facingDirection: Direction;
 };
 
+type GroundItemVisual = {
+    container: GameObjects.Container;
+    quantityLabel: GameObjects.Text;
+    itemId: string;
+    slug: string;
+    tileX: number;
+    tileY: number;
+    homeX: number;
+    homeY: number;
+};
+
+type InventoryUiSlotRefs = {
+    inventorySlots: HTMLDivElement;
+    groundSlots: HTMLDivElement;
+    quantityInput: HTMLInputElement;
+    goldLabel: HTMLDivElement;
+};
+
 export class Game extends Scene {
     private player!: Player;
     private readonly creatures = new Map<string, Creature>();
@@ -131,9 +166,22 @@ export class Game extends Scene {
     private hasAppliedServerSpawn = false;
     private isGameReady = false;
     private chatInputElement: HTMLInputElement | null = null;
+    private inventoryUiRoot: HTMLDivElement | null = null;
+    private inventoryUiSlots: InventoryUiSlotRefs | null = null;
+    private isInventoryWindowOpen = false;
 
     private readonly networkPlayers = new Map<string, NetworkPlayerVisual>();
     private readonly knownCreatureAliveById = new Map<string, boolean>();
+    private readonly groundItemVisuals = new Map<string, GroundItemVisual>();
+    private readonly groundItemsById = new Map<string, WorldGroundItemState>();
+
+    private inventoryItems: InventoryEntry[] = [];
+    private inventoryGoldCopper = 0;
+    private hasRegisteredInventoryDnD = false;
+    private hasRegisteredGroundVisualDnD = false;
+    private activeDraggedGroundItemId: string | null = null;
+    private lastMouseClientX = 0;
+    private lastMouseClientY = 0;
 
     private canMove = true;
     private canAttack = true;
@@ -652,6 +700,8 @@ export class Game extends Scene {
             room.onStateChange((state) => {
                 this.syncNetworkPlayers(state);
                 this.syncCreatures(state.creatures);
+                this.syncGroundItems(state.groundItems);
+                this.refreshInventoryPanel();
             });
 
             room.onLeave((code) => {
@@ -662,6 +712,7 @@ export class Game extends Scene {
                 this.hasAppliedServerSpawn = false;
                 this.clearNetworkPlayers();
                 this.clearCreatures();
+                this.clearGroundItems();
             });
 
             room.onError((code, message) => {
@@ -675,6 +726,12 @@ export class Game extends Scene {
             room.onMessage(SERVER_TO_CLIENT_MESSAGE.ANNOUNCEMENT, (message: unknown) => {
                 this.handleAnnouncementMessage(message);
             });
+
+            room.onMessage(SERVER_TO_CLIENT_MESSAGE.ITEM_INVENTORY_SYNC, (payload: unknown) => {
+                this.handleInventorySyncMessage(payload);
+            });
+
+            this.requestInventorySync();
         } catch (error: unknown) {
             const message = error instanceof Error ? error.message : 'Unknown error';
 
@@ -703,7 +760,81 @@ export class Game extends Scene {
             this.hasAppliedServerSpawn = false;
             this.clearNetworkPlayers();
             this.clearCreatures();
+            this.clearGroundItems();
+            this.inventoryItems = [];
+                this.inventoryGoldCopper = 0;
+            this.refreshInventoryPanel();
         }
+    }
+
+    private handleInventorySyncMessage(payload: unknown): void {
+        if (!isInventorySyncPayload(payload)) {
+            return;
+        }
+
+        this.inventoryItems = payload.items;
+        this.inventoryGoldCopper = payload.goldCopper;
+        this.refreshInventoryPanel();
+    }
+
+    private requestInventorySync(): void {
+        if (!this.worldRoom) {
+            return;
+        }
+
+        this.worldRoom.send(CLIENT_TO_SERVER_MESSAGE.ITEM_INVENTORY_REQUEST, {});
+    }
+
+    private sendDropItemIntent(
+        slug: string,
+        quantity: number,
+        targetTileX?: number,
+        targetTileY?: number
+    ): void {
+        if (!this.worldRoom) {
+            this.uiScene.logChatMessage('[Sistema] No hay conexion con la room.');
+            return;
+        }
+
+        const payload: DropItemInput = {
+            slug,
+            quantity,
+            targetTileX,
+            targetTileY
+        };
+
+        if (!isDropItemInput(payload)) {
+            this.uiScene.logChatMessage('[Sistema] Payload invalido para drop.');
+            return;
+        }
+
+        this.worldRoom.send(CLIENT_TO_SERVER_MESSAGE.ITEM_DROP, payload);
+    }
+
+    private sendPickupItemIntent(
+        slug: string,
+        quantity: number,
+        targetTileX?: number,
+        targetTileY?: number
+    ): void {
+        if (!this.worldRoom) {
+            this.uiScene.logChatMessage('[Sistema] No hay conexion con la room.');
+            return;
+        }
+
+        const payload: PickupItemInput = {
+            slug,
+            quantity,
+            targetTileX,
+            targetTileY
+        };
+
+        if (!isPickupItemInput(payload)) {
+            this.uiScene.logChatMessage('[Sistema] Payload invalido para pickup.');
+            return;
+        }
+
+        this.worldRoom.send(CLIENT_TO_SERVER_MESSAGE.ITEM_PICKUP, payload);
     }
 
     private handleChatMessage(message: unknown): void {
@@ -819,6 +950,465 @@ export class Game extends Scene {
             this.chatInputElement.blur();
             this.chatInputElement.style.display = 'none';
         });
+
+        keyboard.on('keydown-B', () => {
+            if (this.isChatInputFocused()) {
+                return;
+            }
+
+            this.toggleInventoryWindow();
+        });
+    }
+
+    private createInventoryQuickActionsOverlay(): void {
+        const root = document.createElement('div');
+        root.style.position = 'fixed';
+        root.style.right = '12px';
+        root.style.bottom = '12px';
+        root.style.zIndex = '9997';
+        root.style.display = 'grid';
+        root.style.gap = '6px';
+        root.style.padding = '8px';
+        root.style.border = '1px solid #334155';
+        root.style.borderRadius = '8px';
+        root.style.background = 'rgba(10, 16, 30, 0.95)';
+        root.style.width = '360px';
+        root.style.display = 'none';
+
+        const title = document.createElement('div');
+        title.textContent = 'Inventory (B para abrir/cerrar)';
+        title.style.fontFamily = 'Georgia, serif';
+        title.style.fontSize = '14px';
+        title.style.color = '#f8fafc';
+        title.style.cursor = 'move';
+        title.style.userSelect = 'none';
+
+        const goldLabel = document.createElement('div');
+        goldLabel.style.fontFamily = 'Arial, sans-serif';
+        goldLabel.style.fontSize = '11px';
+        goldLabel.style.color = '#fde68a';
+        goldLabel.textContent = 'Gold: 0g 0s 0c';
+
+        const quantityInput = document.createElement('input');
+        quantityInput.type = 'number';
+        quantityInput.min = '1';
+        quantityInput.step = '1';
+        quantityInput.value = '1';
+        quantityInput.style.width = '90px';
+        quantityInput.style.padding = '4px 6px';
+        quantityInput.style.borderRadius = '6px';
+        quantityInput.style.border = '1px solid #475569';
+        quantityInput.style.background = '#0f172a';
+        quantityInput.style.color = '#f8fafc';
+
+        const quantityRow = document.createElement('div');
+        quantityRow.style.display = 'flex';
+        quantityRow.style.alignItems = 'center';
+        quantityRow.style.gap = '8px';
+
+        const quantityLabel = document.createElement('span');
+        quantityLabel.textContent = 'Cantidad por click:';
+        quantityLabel.style.fontFamily = 'Arial, sans-serif';
+        quantityLabel.style.fontSize = '11px';
+        quantityLabel.style.color = '#cbd5e1';
+
+        quantityRow.appendChild(quantityLabel);
+        quantityRow.appendChild(quantityInput);
+
+        const inventoryTitle = document.createElement('div');
+        inventoryTitle.textContent = 'Backpack (20 slots)';
+        inventoryTitle.style.fontFamily = 'Georgia, serif';
+        inventoryTitle.style.fontSize = '12px';
+        inventoryTitle.style.color = '#e2e8f0';
+
+        const inventorySlots = document.createElement('div');
+        inventorySlots.style.display = 'grid';
+        inventorySlots.style.gridTemplateColumns = 'repeat(5, 1fr)';
+        inventorySlots.style.gap = '4px';
+
+        const groundTitle = document.createElement('div');
+        groundTitle.textContent = 'Ground (current tile, max 10)';
+        groundTitle.style.fontFamily = 'Georgia, serif';
+        groundTitle.style.fontSize = '12px';
+        groundTitle.style.color = '#d1fae5';
+
+        const groundSlots = document.createElement('div');
+        groundSlots.style.display = 'grid';
+        groundSlots.style.gridTemplateColumns = 'repeat(5, 1fr)';
+        groundSlots.style.gap = '4px';
+
+        const refreshButton = document.createElement('button');
+        refreshButton.textContent = 'Refresh inventory';
+        refreshButton.style.padding = '4px 8px';
+        refreshButton.style.borderRadius = '6px';
+        refreshButton.style.border = '1px solid #1d4ed8';
+        refreshButton.style.background = '#1e40af';
+        refreshButton.style.color = '#eff6ff';
+        refreshButton.style.cursor = 'pointer';
+
+        refreshButton.addEventListener('click', () => {
+            this.requestInventorySync();
+            this.refreshInventoryPanel();
+        });
+
+        inventorySlots.addEventListener('dragover', (event) => {
+            event.preventDefault();
+        });
+
+        inventorySlots.addEventListener('drop', (event) => {
+            event.preventDefault();
+            const raw = event.dataTransfer?.getData('application/x-tibia-item-drag');
+
+            if (!raw) {
+                return;
+            }
+
+            const payload = this.parseDraggedItemPayload(raw);
+
+            if (!payload || payload.source !== 'ground') {
+                return;
+            }
+
+            const quantity = this.parseInventoryActionQuantity();
+
+            if (quantity === null) {
+                return;
+            }
+
+            this.sendPickupItemIntent(payload.slug, quantity, payload.tileX, payload.tileY);
+        });
+
+        root.appendChild(title);
+        root.appendChild(goldLabel);
+        root.appendChild(quantityRow);
+        root.appendChild(inventoryTitle);
+        root.appendChild(inventorySlots);
+        root.appendChild(groundTitle);
+        root.appendChild(groundSlots);
+        root.appendChild(refreshButton);
+        document.body.appendChild(root);
+
+        this.inventoryUiRoot = root;
+        this.inventoryUiSlots = {
+            inventorySlots,
+            groundSlots,
+            quantityInput,
+            goldLabel
+        };
+
+        this.enableInventoryWindowDragging(root, title);
+
+        if (!this.hasRegisteredInventoryDnD) {
+            this.registerInventoryDragDropBridges();
+            this.hasRegisteredInventoryDnD = true;
+        }
+
+        this.refreshInventoryPanel();
+    }
+
+    private enableInventoryWindowDragging(root: HTMLDivElement, handle: HTMLDivElement): void {
+        let dragging = false;
+        let offsetX = 0;
+        let offsetY = 0;
+
+        handle.addEventListener('mousedown', (event) => {
+            if (event.button !== 0) {
+                return;
+            }
+
+            event.preventDefault();
+            const rect = root.getBoundingClientRect();
+            dragging = true;
+            offsetX = event.clientX - rect.left;
+            offsetY = event.clientY - rect.top;
+
+            root.style.transform = 'none';
+            root.style.right = 'auto';
+            root.style.bottom = 'auto';
+            root.style.left = `${rect.left}px`;
+            root.style.top = `${rect.top}px`;
+        });
+
+        window.addEventListener('mousemove', (event) => {
+            if (!dragging) {
+                return;
+            }
+
+            root.style.left = `${event.clientX - offsetX}px`;
+            root.style.top = `${event.clientY - offsetY}px`;
+        });
+
+        window.addEventListener('mouseup', () => {
+            dragging = false;
+        });
+    }
+
+    private toggleInventoryWindow(): void {
+        if (!this.inventoryUiRoot) {
+            return;
+        }
+
+        this.isInventoryWindowOpen = !this.isInventoryWindowOpen;
+        this.inventoryUiRoot.style.display = this.isInventoryWindowOpen ? 'grid' : 'none';
+
+        if (this.isInventoryWindowOpen) {
+            this.requestInventorySync();
+            this.refreshInventoryPanel();
+        }
+    }
+
+    private registerInventoryDragDropBridges(): void {
+        if (!this.game.canvas) {
+            return;
+        }
+
+        this.game.canvas.addEventListener('dragover', (event) => {
+            event.preventDefault();
+        });
+
+        this.game.canvas.addEventListener('drop', (event) => {
+            event.preventDefault();
+            const raw = event.dataTransfer?.getData('application/x-tibia-item-drag');
+
+            if (!raw) {
+                return;
+            }
+
+            const payload = this.parseDraggedItemPayload(raw);
+
+            if (!payload || payload.source !== 'inventory') {
+                return;
+            }
+
+            const quantity = this.parseInventoryActionQuantity();
+
+            if (quantity === null) {
+                return;
+            }
+
+            const tile = this.clientPointToTile(event.clientX, event.clientY);
+
+            if (!tile) {
+                return;
+            }
+
+            this.sendDropItemIntent(payload.slug, quantity, tile.tileX, tile.tileY);
+        });
+    }
+
+    private parseDraggedItemPayload(raw: string): {
+        source: 'inventory' | 'ground';
+        slug: string;
+        tileX?: number;
+        tileY?: number;
+    } | null {
+        try {
+            const parsed: unknown = JSON.parse(raw);
+
+            if (!this.isRecord(parsed)) {
+                return null;
+            }
+
+            const source = parsed.source;
+            const slug = parsed.slug;
+
+            if (
+                (source !== 'inventory' && source !== 'ground') ||
+                typeof slug !== 'string'
+            ) {
+                return null;
+            }
+
+            const tileX = typeof parsed.tileX === 'number' ? parsed.tileX : undefined;
+            const tileY = typeof parsed.tileY === 'number' ? parsed.tileY : undefined;
+
+            return {
+                source,
+                slug,
+                tileX,
+                tileY
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    private clientPointToTile(clientX: number, clientY: number): { tileX: number; tileY: number } | null {
+        const canvasRect = this.game.canvas.getBoundingClientRect();
+
+        if (
+            clientX < canvasRect.left ||
+            clientX > canvasRect.right ||
+            clientY < canvasRect.top ||
+            clientY > canvasRect.bottom
+        ) {
+            return null;
+        }
+
+        const normalizedX = clientX - canvasRect.left;
+        const normalizedY = clientY - canvasRect.top;
+        const gameWidth = this.scale.gameSize.width;
+        const gameHeight = this.scale.gameSize.height;
+
+        if (canvasRect.width <= 0 || canvasRect.height <= 0) {
+            return null;
+        }
+
+        const pointerX = normalizedX * (gameWidth / canvasRect.width);
+        const pointerY = normalizedY * (gameHeight / canvasRect.height);
+
+        const worldPoint = this.cameras.main.getWorldPoint(pointerX, pointerY);
+        const tileX = Math.floor(worldPoint.x / TILE_SIZE);
+        const tileY = Math.floor(worldPoint.y / TILE_SIZE);
+
+        if (
+            tileX < 0 ||
+            tileY < 0 ||
+            tileX >= MAP_WIDTH_IN_TILES ||
+            tileY >= MAP_HEIGHT_IN_TILES
+        ) {
+            return null;
+        }
+
+        return { tileX, tileY };
+    }
+
+    private registerGroundVisualDragHandlers(): void {
+        window.addEventListener('mousemove', (event) => {
+            this.lastMouseClientX = event.clientX;
+            this.lastMouseClientY = event.clientY;
+        });
+
+        window.addEventListener('mouseup', (event) => {
+            if (!this.activeDraggedGroundItemId) {
+                return;
+            }
+
+            this.finalizeGroundItemDrag(this.activeDraggedGroundItemId, event.clientX, event.clientY);
+        });
+
+        this.input.on('dragstart', (_pointer: unknown, gameObject: GameObjects.GameObject) => {
+            if (!(gameObject instanceof GameObjects.Container)) {
+                return;
+            }
+
+            const itemId = gameObject.getData('groundItemId');
+
+            if (typeof itemId !== 'string') {
+                return;
+            }
+
+            const visual = this.groundItemVisuals.get(itemId);
+
+            if (!visual) {
+                return;
+            }
+
+            this.activeDraggedGroundItemId = itemId;
+            if (this.inventoryUiRoot) {
+                this.inventoryUiRoot.style.pointerEvents = 'none';
+            }
+            visual.homeX = visual.container.x;
+            visual.homeY = visual.container.y;
+            visual.container.setAlpha(0.75);
+        });
+
+        this.input.on(
+            'drag',
+            (_pointer: unknown, gameObject: GameObjects.GameObject, dragX: number, dragY: number) => {
+                if (!(gameObject instanceof GameObjects.Container)) {
+                    return;
+                }
+
+                const itemId = gameObject.getData('groundItemId');
+
+                if (typeof itemId !== 'string') {
+                    return;
+                }
+
+                gameObject.setPosition(dragX, dragY);
+            }
+        );
+
+        this.input.on(
+            'dragend',
+            (pointer: Phaser.Input.Pointer, gameObject: GameObjects.GameObject) => {
+                if (!(gameObject instanceof GameObjects.Container)) {
+                    return;
+                }
+
+                const itemId = gameObject.getData('groundItemId');
+
+                if (typeof itemId !== 'string') {
+                    return;
+                }
+                const canvasRect = this.game.canvas.getBoundingClientRect();
+                const pointerClientX = canvasRect.left + pointer.x;
+                const pointerClientY = canvasRect.top + pointer.y;
+
+                const clientX =
+                    this.lastMouseClientX !== 0 ? this.lastMouseClientX : pointerClientX;
+                const clientY =
+                    this.lastMouseClientY !== 0 ? this.lastMouseClientY : pointerClientY;
+
+                this.finalizeGroundItemDrag(itemId, clientX, clientY);
+            }
+        );
+    }
+
+    private finalizeGroundItemDrag(itemId: string, clientX: number, clientY: number): void {
+        const visual = this.groundItemVisuals.get(itemId);
+
+        if (this.inventoryUiRoot) {
+            this.inventoryUiRoot.style.pointerEvents = 'auto';
+        }
+
+        if (!visual) {
+            this.activeDraggedGroundItemId = null;
+            return;
+        }
+
+        visual.container.setPosition(visual.homeX, visual.homeY);
+        visual.container.setAlpha(1);
+        this.activeDraggedGroundItemId = null;
+
+        const quantity = this.parseInventoryActionQuantity();
+
+        if (quantity === null) {
+            return;
+        }
+
+        if (!this.isPointInsideInventoryWindow(clientX, clientY)) {
+            return;
+        }
+
+        this.sendPickupItemIntent(
+            visual.slug,
+            quantity,
+            visual.tileX,
+            visual.tileY
+        );
+    }
+
+    private isPointInsideInventoryWindow(clientX: number, clientY: number): boolean {
+        if (!this.inventoryUiRoot || this.inventoryUiRoot.style.display === 'none') {
+            return false;
+        }
+
+        const hitElement = document.elementFromPoint(clientX, clientY);
+
+        if (hitElement && this.inventoryUiRoot.contains(hitElement)) {
+            return true;
+        }
+
+        const rect = this.inventoryUiRoot.getBoundingClientRect();
+
+        return (
+            clientX >= rect.left &&
+            clientX <= rect.right &&
+            clientY >= rect.top &&
+            clientY <= rect.bottom
+        );
     }
 
     private sendChatMessage(text: string): void {
@@ -1014,7 +1604,7 @@ export class Game extends Scene {
             return null;
         }
 
-        const { id, name, tileX, tileY, level, experience } = rawPlayer;
+        const { id, name, tileX, tileY, level, experience, goldCopper } = rawPlayer;
 
         if (
             typeof id !== 'string' ||
@@ -1022,7 +1612,8 @@ export class Game extends Scene {
             typeof tileX !== 'number' ||
             typeof tileY !== 'number' ||
             typeof level !== 'number' ||
-            typeof experience !== 'number'
+            typeof experience !== 'number' ||
+            typeof goldCopper !== 'number'
         ) {
             return null;
         }
@@ -1033,7 +1624,8 @@ export class Game extends Scene {
             tileX,
             tileY,
             level,
-            experience
+            experience,
+            goldCopper
         };
     }
 
@@ -1167,10 +1759,20 @@ export class Game extends Scene {
         this.configureCamera();
         this.launchUiScene();
         this.createChatInputOverlay();
+        this.createInventoryQuickActionsOverlay();
+
+        if (!this.hasRegisteredGroundVisualDnD) {
+            this.registerGroundVisualDragHandlers();
+            this.hasRegisteredGroundVisualDnD = true;
+        }
 
         this.events.once('shutdown', () => {
             this.chatInputElement?.parentElement?.remove();
             this.chatInputElement = null;
+            this.inventoryUiRoot?.remove();
+            this.inventoryUiRoot = null;
+            this.inventoryUiSlots = null;
+            this.isInventoryWindowOpen = false;
             void this.leaveWorldRoom();
         });
 
@@ -1900,6 +2502,312 @@ export class Game extends Scene {
         this.knownCreatureAliveById.clear();
     }
 
+    private syncGroundItems(rawGroundItems: unknown): void {
+        if (!this.isRecord(rawGroundItems)) {
+            this.clearGroundItems();
+            return;
+        }
+
+        const seenIds = new Set<string>();
+        const mapLike = rawGroundItems as {
+            entries?: () => IterableIterator<[string, unknown]>;
+        };
+
+        if (typeof mapLike.entries === 'function') {
+            for (const [id, rawItem] of mapLike.entries()) {
+                const parsed = this.parseGroundItemState(rawItem);
+
+                if (!parsed) {
+                    continue;
+                }
+
+                seenIds.add(id);
+                this.groundItemsById.set(parsed.id, parsed);
+                this.upsertGroundItemVisual(parsed);
+            }
+        } else {
+            for (const [id, rawItem] of Object.entries(rawGroundItems)) {
+                const parsed = this.parseGroundItemState(rawItem);
+
+                if (!parsed) {
+                    continue;
+                }
+
+                seenIds.add(id);
+                this.groundItemsById.set(parsed.id, parsed);
+                this.upsertGroundItemVisual(parsed);
+            }
+        }
+
+        for (const [id, visual] of this.groundItemVisuals) {
+            if (seenIds.has(id)) {
+                continue;
+            }
+
+            visual.container.destroy();
+            this.groundItemVisuals.delete(id);
+            this.groundItemsById.delete(id);
+        }
+
+        this.refreshInventoryPanel();
+    }
+
+    private parseGroundItemState(value: unknown): WorldGroundItemState | null {
+        if (!this.isRecord(value)) {
+            return null;
+        }
+
+        const { id, slug, name, tileX, tileY, quantity } = value;
+
+        if (
+            typeof id !== 'string' ||
+            typeof slug !== 'string' ||
+            typeof name !== 'string' ||
+            typeof tileX !== 'number' ||
+            typeof tileY !== 'number' ||
+            typeof quantity !== 'number'
+        ) {
+            return null;
+        }
+
+        return {
+            id,
+            slug,
+            name,
+            tileX,
+            tileY,
+            quantity
+        };
+    }
+
+    private upsertGroundItemVisual(item: WorldGroundItemState): void {
+        const position = tileToWorldPosition(item.tileX, item.tileY, TILE_SIZE);
+        let visual = this.groundItemVisuals.get(item.id);
+
+        if (!visual) {
+            const icon = this.add
+                .circle(0, 0, 5, 0xffd166)
+                .setStrokeStyle(1, 0x5b4300);
+
+            const qty = this.add
+                .text(8, -10, '', {
+                    fontFamily: 'Arial',
+                    fontSize: '10px',
+                    color: '#fff7cc',
+                    stroke: '#000000',
+                    strokeThickness: 2
+                })
+                .setOrigin(0, 0.5);
+
+            const container = this.add.container(position.x, position.y, [icon, qty]);
+            container.setDepth(8);
+            container.setSize(34, 22);
+            container.setInteractive({ useHandCursor: true });
+            container.setData('groundItemId', item.id);
+            this.input.setDraggable(container, true);
+
+            visual = {
+                container,
+                quantityLabel: qty,
+                itemId: item.id,
+                slug: item.slug,
+                tileX: item.tileX,
+                tileY: item.tileY,
+                homeX: position.x,
+                homeY: position.y
+            };
+
+            this.groundItemVisuals.set(item.id, visual);
+        }
+
+        visual.container.setPosition(position.x, position.y);
+        visual.quantityLabel.setText(`${item.slug} x${item.quantity}`);
+        visual.slug = item.slug;
+        visual.tileX = item.tileX;
+        visual.tileY = item.tileY;
+        visual.homeX = position.x;
+        visual.homeY = position.y;
+    }
+
+    private clearGroundItems(): void {
+        for (const visual of this.groundItemVisuals.values()) {
+            visual.container.destroy();
+        }
+
+        this.groundItemVisuals.clear();
+        this.groundItemsById.clear();
+        this.refreshInventoryPanel();
+    }
+
+    private refreshInventoryPanel(): void {
+        if (!this.inventoryUiSlots) {
+            return;
+        }
+
+        const { inventorySlots, groundSlots, goldLabel } = this.inventoryUiSlots;
+
+        inventorySlots.replaceChildren();
+        groundSlots.replaceChildren();
+
+        const { gold, silver, copper } = this.formatGold(this.inventoryGoldCopper);
+        goldLabel.textContent = `Gold: ${gold}g ${silver}s ${copper}c`;
+
+        const inventoryBySlot = this.inventoryItems.slice(0, 20);
+
+        for (let slotIndex = 0; slotIndex < 20; slotIndex += 1) {
+            const item = inventoryBySlot[slotIndex] ?? null;
+            const slot = this.createSlotElement(item, false);
+            inventorySlots.appendChild(slot);
+        }
+
+        const localTileX = this.player?.tileX;
+        const localTileY = this.player?.tileY;
+
+        if (typeof localTileX !== 'number' || typeof localTileY !== 'number') {
+            return;
+        }
+
+        const groundAtTile = [...this.groundItemsById.values()]
+            .filter((item) => item.tileX === localTileX && item.tileY === localTileY)
+            .sort((a, b) => a.slug.localeCompare(b.slug))
+            .slice(0, 10);
+
+        for (let slotIndex = 0; slotIndex < 10; slotIndex += 1) {
+            const item = groundAtTile[slotIndex] ?? null;
+            const slot = this.createSlotElement(
+                item
+                    ? {
+                        slug: item.slug,
+                        name: item.name,
+                        quantity: item.quantity,
+                        tileX: item.tileX,
+                        tileY: item.tileY
+                    }
+                    : null,
+                true
+            );
+
+            groundSlots.appendChild(slot);
+        }
+    }
+
+    private parseInventoryActionQuantity(): number | null {
+        if (!this.inventoryUiSlots) {
+            return null;
+        }
+
+        const quantity = Number.parseInt(this.inventoryUiSlots.quantityInput.value, 10);
+
+        if (!Number.isInteger(quantity) || quantity <= 0) {
+            this.uiScene.logChatMessage('[Sistema] Cantidad invalida.');
+            return null;
+        }
+
+        return quantity;
+    }
+
+    private createSlotElement(
+        item: {
+            slug: string;
+            name: string;
+            quantity: number;
+            tileX?: number;
+            tileY?: number;
+        } | null,
+        isGround: boolean
+    ): HTMLButtonElement {
+        const slot = document.createElement('button');
+        slot.type = 'button';
+        slot.style.width = '64px';
+        slot.style.height = '52px';
+        slot.style.borderRadius = '8px';
+        slot.style.border = '1px solid #475569';
+        slot.style.background = '#0f172a';
+        slot.style.color = '#e2e8f0';
+        slot.style.padding = '4px';
+        slot.style.textAlign = 'left';
+        slot.style.cursor = item ? 'pointer' : 'default';
+
+        if (!item) {
+            slot.textContent = '';
+            slot.disabled = true;
+            slot.style.opacity = '0.45';
+            return slot;
+        }
+
+        slot.draggable = true;
+
+        const title = document.createElement('div');
+        title.textContent = item.slug;
+        title.style.fontFamily = 'Arial, sans-serif';
+        title.style.fontSize = '9px';
+        title.style.color = '#f8fafc';
+
+        const qty = document.createElement('div');
+        qty.textContent = `x${item.quantity}`;
+        qty.style.fontFamily = 'Arial, sans-serif';
+        qty.style.fontSize = '10px';
+        qty.style.fontWeight = '700';
+        qty.style.color = isGround ? '#bbf7d0' : '#fde68a';
+
+        const action = document.createElement('div');
+        action.textContent = isGround ? 'Pickup' : 'Drop';
+        action.style.fontFamily = 'Arial, sans-serif';
+        action.style.fontSize = '8px';
+        action.style.color = isGround ? '#86efac' : '#fca5a5';
+
+        slot.appendChild(title);
+        slot.appendChild(qty);
+        slot.appendChild(action);
+
+        slot.addEventListener('click', () => {
+            const parsedQuantity = this.parseInventoryActionQuantity();
+
+            if (parsedQuantity === null) {
+                return;
+            }
+
+            if (isGround) {
+                this.sendPickupItemIntent(item.slug, parsedQuantity, item.tileX, item.tileY);
+                return;
+            }
+
+            this.sendDropItemIntent(item.slug, parsedQuantity);
+        });
+
+        slot.addEventListener('dragstart', (event) => {
+            const payload = {
+                source: isGround ? 'ground' : 'inventory',
+                slug: item.slug,
+                tileX: isGround ? item.tileX : undefined,
+                tileY: isGround ? item.tileY : undefined
+            };
+
+            event.dataTransfer?.setData('application/x-tibia-item-drag', JSON.stringify(payload));
+            event.dataTransfer?.setData('text/plain', item.slug);
+            event.dataTransfer?.setDragImage(slot, 20, 20);
+        });
+
+        return slot;
+    }
+
+    private formatGold(totalCopper: number): {
+        gold: number;
+        silver: number;
+        copper: number;
+    } {
+        const normalized = Math.max(0, Math.floor(totalCopper));
+        const gold = Math.floor(normalized / 10_000);
+        const silver = Math.floor((normalized % 10_000) / 100);
+        const copper = normalized % 100;
+
+        return {
+            gold,
+            silver,
+            copper
+        };
+    }
+
     private isRecord(value: unknown): value is Record<string, unknown> {
         return typeof value === 'object' && value !== null;
     }
@@ -1920,6 +2828,7 @@ export class Game extends Scene {
         const tileY = typeof value.tileY === 'number' ? value.tileY : 5;
         const level = typeof value.level === 'number' ? value.level : 1;
         const experience = typeof value.experience === 'number' ? value.experience : 0;
+        const goldCopper = typeof value.goldCopper === 'number' ? value.goldCopper : 0;
 
         return {
             id,
@@ -1927,7 +2836,8 @@ export class Game extends Scene {
             tileX,
             tileY,
             level,
-            experience
+            experience,
+            goldCopper
         };
     }
 }

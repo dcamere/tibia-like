@@ -4,9 +4,11 @@ import {
     CLIENT_TO_SERVER_MESSAGE,
     DIRECTION_DELTAS,
     DIRECTIONS,
+    isDropItemInput,
     isAttackInput,
     isChatSendInput,
     isMoveInput,
+    isPickupItemInput,
     isWalkableTile,
     isWorldJoinOptions,
     MAP_HEIGHT_IN_TILES,
@@ -17,6 +19,7 @@ import {
     type ChatMessagePayload,
     type CreatureId,
     type CreatureType,
+    type InventorySyncPayload,
     type TilePosition
 } from '@tibia-like/shared';
 
@@ -29,11 +32,14 @@ import {
 import {
     dropItemFromCharacter,
     giveItemToCharacter,
+    getCharacterGoldCopper,
+    listAllGroundItems,
     listGroundItemsAt,
     listInventory,
     pickupGroundItemForCharacter
 } from '../inventory/InventoryService';
 import { CreatureState } from '../state/CreatureState';
+import { GroundItemState } from '../state/GroundItemState';
 import { PlayerState } from '../state/PlayerState';
 import { WorldState } from '../state/WorldState';
 
@@ -44,6 +50,7 @@ type RoomAuthData = AuthSession & {
     tileY: number;
     level: number;
     experience: number;
+    goldCopper: number;
 };
 
 type PlayerRuntimeFlags = {
@@ -84,6 +91,7 @@ const CHAT_MAX_LENGTH = 180;
 const CHAT_COOLDOWN_MS = 250;
 const CHAT_LOCAL_RANGE_IN_TILES = 7;
 const MAX_SPEED_MULTIPLIER = 4;
+const ITEM_DROP_PICKUP_RANGE = 1;
 
 const CREATURE_SPAWNS: readonly CreatureSpawnDefinition[] = [
     {
@@ -147,13 +155,15 @@ export class WorldRoom extends Room {
             tileX: character.tileX,
             tileY: character.tileY,
             level: character.level,
-            experience: character.experience
+            experience: character.experience,
+            goldCopper: character.goldCopper
         };
     }
 
     onCreate(): void {
         this.setState(new WorldState());
         this.initializeRoomCreatures();
+        void this.syncGroundItemsStateFromDatabase();
 
         this.onMessage(CLIENT_TO_SERVER_MESSAGE.PLAYER_MOVE, (client, payload: unknown) => {
             this.handlePlayerMove(client, payload);
@@ -172,6 +182,39 @@ export class WorldRoom extends Room {
 
                 console.error('[WorldRoom] chat handler failed', message);
                 this.sendSystemMessage(client.sessionId, 'Error procesando el chat.');
+            });
+        });
+
+        this.onMessage(CLIENT_TO_SERVER_MESSAGE.ITEM_DROP, (client, payload: unknown) => {
+            void this.handleItemDropIntent(client, payload).catch((error: unknown) => {
+                const message =
+                    error instanceof Error
+                        ? error.message
+                        : 'Unknown inventory drop error.';
+
+                this.sendSystemMessage(client.sessionId, message);
+            });
+        });
+
+        this.onMessage(CLIENT_TO_SERVER_MESSAGE.ITEM_PICKUP, (client, payload: unknown) => {
+            void this.handleItemPickupIntent(client, payload).catch((error: unknown) => {
+                const message =
+                    error instanceof Error
+                        ? error.message
+                        : 'Unknown inventory pickup error.';
+
+                this.sendSystemMessage(client.sessionId, message);
+            });
+        });
+
+        this.onMessage(CLIENT_TO_SERVER_MESSAGE.ITEM_INVENTORY_REQUEST, (client) => {
+            void this.sendInventorySnapshot(client.sessionId).catch((error: unknown) => {
+                const message =
+                    error instanceof Error
+                        ? error.message
+                        : 'Unknown inventory sync error.';
+
+                this.sendSystemMessage(client.sessionId, message);
             });
         });
 
@@ -206,6 +249,7 @@ export class WorldRoom extends Room {
         player.tileY = spawnTile.tileY;
         player.level = auth.level;
         player.experience = auth.experience;
+        player.goldCopper = auth.goldCopper;
 
         this.state.players.set(client.sessionId, player);
         this.characterIdByPlayerSession.set(client.sessionId, auth.characterId);
@@ -213,6 +257,8 @@ export class WorldRoom extends Room {
             speedMultiplier: 1,
             godMode: false
         });
+
+        void this.sendInventorySnapshot(client.sessionId);
 
         console.info(`[WorldRoom] ${client.sessionId} joined as ${player.name}`);
     }
@@ -226,7 +272,8 @@ export class WorldRoom extends Room {
                 tileX: player.tileX,
                 tileY: player.tileY,
                 level: player.level,
-                experience: player.experience
+                experience: player.experience,
+                goldCopper: player.goldCopper
             });
         }
 
@@ -400,56 +447,30 @@ export class WorldRoom extends Room {
         }
 
         if (commandName === '/drop') {
-            const characterId = this.characterIdByPlayerSession.get(sender.id);
             const slug = parts.shift()?.trim().toLowerCase() ?? '';
             const quantity = Number.parseInt(parts.shift() ?? '1', 10);
-
-            if (!characterId) {
-                this.sendSystemMessage(client.sessionId, 'No se pudo resolver tu personaje.');
-                return;
-            }
 
             if (!slug || !Number.isInteger(quantity) || quantity <= 0) {
                 this.sendSystemMessage(client.sessionId, 'Uso: /drop <slug> <qty>');
                 return;
             }
 
-            await dropItemFromCharacter(
-                characterId,
-                slug,
-                quantity,
-                sender.tileX,
-                sender.tileY
-            );
+            await this.handleItemDropIntent(client, { slug, quantity });
 
             this.sendSystemMessage(client.sessionId, `Soltaste ${slug} x${quantity}.`);
             return;
         }
 
         if (commandName === '/pickup') {
-            const characterId = this.characterIdByPlayerSession.get(sender.id);
             const slug = parts.shift()?.trim().toLowerCase() ?? '';
             const quantity = Number.parseInt(parts.shift() ?? '1', 10);
-
-            if (!characterId) {
-                this.sendSystemMessage(client.sessionId, 'No se pudo resolver tu personaje.');
-                return;
-            }
 
             if (!slug || !Number.isInteger(quantity) || quantity <= 0) {
                 this.sendSystemMessage(client.sessionId, 'Uso: /pickup <slug> <qty>');
                 return;
             }
 
-            await pickupGroundItemForCharacter({
-                characterId,
-                slug,
-                quantity,
-                playerTileX: sender.tileX,
-                playerTileY: sender.tileY,
-                targetTileX: sender.tileX,
-                targetTileY: sender.tileY
-            });
+            await this.handleItemPickupIntent(client, { slug, quantity });
 
             this.sendSystemMessage(client.sessionId, `Recogiste ${slug} x${quantity}.`);
             return;
@@ -665,6 +686,7 @@ export class WorldRoom extends Room {
             await giveItemToCharacter(characterId, slug, quantity);
             this.sendSystemMessage(client.sessionId, `Entregaste ${slug} x${quantity} a ${target.name}.`);
             this.sendSystemMessage(target.id, `Recibiste ${slug} x${quantity} de un GM.`);
+            await this.sendInventorySnapshot(target.id);
             return;
         }
 
@@ -692,6 +714,162 @@ export class WorldRoom extends Room {
                 from: senderName,
                 text
             });
+        }
+    }
+
+    private async handleItemDropIntent(client: Client, payload: unknown): Promise<void> {
+        const player = this.state.players.get(client.sessionId);
+        const characterId = this.characterIdByPlayerSession.get(client.sessionId);
+
+        if (!player || !characterId || !isDropItemInput(payload)) {
+            throw new Error('Invalid drop payload.');
+        }
+
+        const slug = payload.slug.trim().toLowerCase();
+        const quantity = Math.floor(payload.quantity);
+        const targetTileX = this.resolveTargetTileCoordinate(payload.targetTileX, player.tileX);
+        const targetTileY = this.resolveTargetTileCoordinate(payload.targetTileY, player.tileY);
+
+        if (!slug || quantity <= 0) {
+            throw new Error('Invalid drop payload values.');
+        }
+
+        this.assertItemTargetInRange(player.tileX, player.tileY, targetTileX, targetTileY);
+
+        await dropItemFromCharacter(
+            characterId,
+            slug,
+            quantity,
+            targetTileX,
+            targetTileY
+        );
+
+        await this.sendInventorySnapshot(client.sessionId);
+        await this.syncGroundItemsStateFromDatabase();
+    }
+
+    private async handleItemPickupIntent(client: Client, payload: unknown): Promise<void> {
+        const player = this.state.players.get(client.sessionId);
+        const characterId = this.characterIdByPlayerSession.get(client.sessionId);
+
+        if (!player || !characterId || !isPickupItemInput(payload)) {
+            throw new Error('Invalid pickup payload.');
+        }
+
+        const slug = payload.slug.trim().toLowerCase();
+        const quantity = Math.floor(payload.quantity);
+        const targetTileX = this.resolveTargetTileCoordinate(payload.targetTileX, player.tileX);
+        const targetTileY = this.resolveTargetTileCoordinate(payload.targetTileY, player.tileY);
+
+        if (!slug || quantity <= 0) {
+            throw new Error('Invalid pickup payload values.');
+        }
+
+        this.assertItemTargetInRange(player.tileX, player.tileY, targetTileX, targetTileY);
+
+        await pickupGroundItemForCharacter({
+            characterId,
+            playerTileX: player.tileX,
+            playerTileY: player.tileY,
+            slug,
+            quantity,
+            targetTileX,
+            targetTileY
+        });
+
+        await this.sendInventorySnapshot(client.sessionId);
+        await this.syncGroundItemsStateFromDatabase();
+    }
+
+    private async sendInventorySnapshot(sessionId: string): Promise<void> {
+        const characterId = this.characterIdByPlayerSession.get(sessionId);
+
+        if (!characterId) {
+            return;
+        }
+
+        const items = await listInventory(characterId);
+        const goldCopper = await getCharacterGoldCopper(characterId);
+
+        const payload: InventorySyncPayload = {
+            items,
+            goldCopper
+        };
+
+        const client = this.getClientBySessionId(sessionId);
+
+        if (!client) {
+            return;
+        }
+
+        client.send(SERVER_TO_CLIENT_MESSAGE.ITEM_INVENTORY_SYNC, payload);
+
+        const player = this.state.players.get(sessionId);
+
+        if (player) {
+            player.goldCopper = goldCopper;
+        }
+    }
+
+    private resolveTargetTileCoordinate(value: number | undefined, fallback: number): number {
+        if (value === undefined) {
+            return fallback;
+        }
+
+        return Math.floor(value);
+    }
+
+    private assertItemTargetInRange(
+        playerTileX: number,
+        playerTileY: number,
+        targetTileX: number,
+        targetTileY: number
+    ): void {
+        if (
+            targetTileX < 0 ||
+            targetTileY < 0 ||
+            targetTileX >= MAP_WIDTH_IN_TILES ||
+            targetTileY >= MAP_HEIGHT_IN_TILES
+        ) {
+            throw new Error('Target tile out of bounds.');
+        }
+
+        const distanceX = Math.abs(targetTileX - playerTileX);
+        const distanceY = Math.abs(targetTileY - playerTileY);
+
+        if (Math.max(distanceX, distanceY) > ITEM_DROP_PICKUP_RANGE + 0.001) {
+            throw new Error('Target tile is out of range.');
+        }
+    }
+
+    private async syncGroundItemsStateFromDatabase(): Promise<void> {
+        const snapshots = await listAllGroundItems();
+        const seenIds = new Set<string>();
+
+        for (const snapshot of snapshots) {
+            seenIds.add(snapshot.id);
+
+            let stateItem = this.state.groundItems.get(snapshot.id);
+
+            if (!stateItem) {
+                stateItem = new GroundItemState();
+                stateItem.id = snapshot.id;
+                this.state.groundItems.set(snapshot.id, stateItem);
+            }
+
+            stateItem.slug = snapshot.slug;
+            stateItem.name = snapshot.name;
+            stateItem.tileX = snapshot.tileX;
+            stateItem.tileY = snapshot.tileY;
+            stateItem.quantity = snapshot.quantity;
+        }
+
+        const existingIds = [...this.state.groundItems.keys()];
+
+        for (const id of existingIds) {
+            if (!seenIds.has(id)) {
+                this.state.groundItems.delete(id);
+            }
         }
     }
 

@@ -13,6 +13,7 @@ export type CharacterSummary = {
     tileY: number;
     level: number;
     experience: number;
+    goldCopper: number;
 };
 
 export type AuthRegisterInput = AuthCredentials & {

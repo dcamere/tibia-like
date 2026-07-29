@@ -1,8 +1,11 @@
 import { Schema, type } from '@colyseus/schema';
 
-export class PlayerState extends Schema {
+export class GroundItemState extends Schema {
     @type('string')
     declare id: string;
+
+    @type('string')
+    declare slug: string;
 
     @type('string')
     declare name: string;
@@ -14,11 +17,5 @@ export class PlayerState extends Schema {
     declare tileY: number;
 
     @type('number')
-    declare level: number;
-
-    @type('number')
-    declare experience: number;
-
-    @type('number')
-    declare goldCopper: number;
+    declare quantity: number;
 }
