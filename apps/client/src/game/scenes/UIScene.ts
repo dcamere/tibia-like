@@ -2,6 +2,20 @@ import { GameObjects, Scene } from 'phaser';
 
 const MAX_COMBAT_LOG_LINES = 4;
 const MAX_CHAT_LOG_LINES = 8;
+const HUD_BOTTOM_BAR_CLEARANCE = 104;
+
+const HUD_COLORS = {
+    panel: 'rgba(22, 16, 10, 0.84)',
+    border: '#7c5c2b',
+    text: '#f5e7c6',
+    textSoft: '#d7c49c',
+    combat: '#f7d66b',
+    chat: '#d8e7ff',
+    announcement: '#fff0bf'
+} as const;
+
+const HUD_FONT_TITLE = 'Georgia';
+const HUD_FONT_BODY = 'Trebuchet MS, Arial, sans-serif';
 
 /**
  * Dedicated HUD scene. Runs in parallel with Game and uses its own,
@@ -22,10 +36,13 @@ export class UIScene extends Scene {
     }
 
     create(): void {
-        this.createInstructions();
         this.createCombatLog();
         this.createChatLog();
         this.createAnnouncementBanner();
+
+        this.scale.on('resize', () => {
+            this.layoutHudAnchors();
+        });
     }
 
     public logMessage(message: string): void {
@@ -69,7 +86,7 @@ export class UIScene extends Scene {
         this.tweens.add({
             targets: this.announcementText,
             alpha: 0,
-            duration: 2600,
+            duration: 5000,
             ease: 'Quad.Out',
             onComplete: () => {
                 this.announcementText?.setVisible(false);
@@ -77,37 +94,19 @@ export class UIScene extends Scene {
         });
     }
 
-    private createInstructions(): void {
-        this.add
-            .text(
-                16,
-                16,
-                'WASD o flechas para moverte\nClic en una criatura para seleccionarla\nEspacio para atacar (rango 1 casilla)\nEnter para abrir chat\nEsc o clic vacío para cancelar el objetivo',
-                {
-                    fontFamily: 'Arial',
-                    fontSize: '16px',
-                    color: '#ffffff',
-                    backgroundColor: '#000000aa',
-                    padding: {
-                        x: 10,
-                        y: 6
-                    }
-                }
-            )
-            .setDepth(1000);
-    }
-
     private createCombatLog(): void {
         this.combatLogText = this.add
-            .text(16, this.scale.height - 16, '', {
-                fontFamily: 'Arial',
+            .text(16, this.scale.height - HUD_BOTTOM_BAR_CLEARANCE, '', {
+                fontFamily: HUD_FONT_BODY,
                 fontSize: '13px',
-                color: '#ffe066',
-                backgroundColor: '#000000aa',
+                color: HUD_COLORS.combat,
+                backgroundColor: HUD_COLORS.panel,
                 padding: {
-                    x: 8,
-                    y: 6
-                }
+                    x: 10,
+                    y: 8
+                },
+                stroke: '#1a1207',
+                strokeThickness: 3
             })
             .setOrigin(0, 1)
             .setDepth(1000);
@@ -117,16 +116,23 @@ export class UIScene extends Scene {
 
     private createChatLog(): void {
         this.chatLogText = this.add
-            .text(this.scale.width - 16, this.scale.height - 16, '', {
-                fontFamily: 'Arial',
+            .text(
+                this.scale.width - 16,
+                this.scale.height - HUD_BOTTOM_BAR_CLEARANCE,
+                '',
+                {
+                fontFamily: HUD_FONT_BODY,
                 fontSize: '13px',
-                color: '#dbeafe',
-                backgroundColor: '#000000aa',
+                color: HUD_COLORS.chat,
+                backgroundColor: HUD_COLORS.panel,
                 padding: {
-                    x: 8,
-                    y: 6
+                    x: 10,
+                    y: 8
+                },
+                stroke: '#1a1207',
+                strokeThickness: 3
                 }
-            })
+            )
             .setOrigin(1, 1)
             .setDepth(1000);
 
@@ -136,15 +142,15 @@ export class UIScene extends Scene {
     private createAnnouncementBanner(): void {
         this.announcementText = this.add
             .text(this.scale.width / 2, 48, '', {
-                fontFamily: 'Georgia',
+                fontFamily: HUD_FONT_TITLE,
                 fontSize: '32px',
-                color: '#fff1b8',
+                color: HUD_COLORS.announcement,
                 stroke: '#1a1207',
                 strokeThickness: 8,
-                backgroundColor: '#2a1a0fcc',
+                backgroundColor: 'rgba(42, 26, 15, 0.90)',
                 padding: {
-                    x: 16,
-                    y: 10
+                    x: 18,
+                    y: 12
                 },
                 align: 'center'
             })
@@ -152,5 +158,21 @@ export class UIScene extends Scene {
             .setDepth(1100)
             .setVisible(false)
             .setAlpha(0);
+    }
+
+    private layoutHudAnchors(): void {
+        const bottomY = this.scale.height - HUD_BOTTOM_BAR_CLEARANCE;
+
+        if (this.combatLogText) {
+            this.combatLogText.setPosition(16, bottomY);
+        }
+
+        if (this.chatLogText) {
+            this.chatLogText.setPosition(this.scale.width - 16, bottomY);
+        }
+
+        if (this.announcementText) {
+            this.announcementText.setPosition(this.scale.width / 2, 48);
+        }
     }
 }

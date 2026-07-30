@@ -2,6 +2,7 @@ export * from './direction';
 export * from './creature';
 export * from './chat';
 export * from './inventory';
+export * from './friends';
 export * from './entity';
 export * from './auth';
 export * from './input';

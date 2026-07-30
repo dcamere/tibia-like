@@ -4,6 +4,9 @@ import {
     CLIENT_TO_SERVER_MESSAGE,
     DIRECTION_DELTAS,
     DIRECTIONS,
+    isBlockingTile,
+    isFriendRequestCreateInput,
+    isFriendRequestRespondInput,
     isDropItemInput,
     isAttackInput,
     isChatSendInput,
@@ -16,6 +19,7 @@ import {
     SERVER_TO_CLIENT_MESSAGE,
     STARTER_CITY_DEFAULT_SPAWN,
     STARTER_CITY_SPAWN_TILES,
+    TileType,
     WORLD_ROOM_NAME,
     type AnnouncementPayload,
     type ChatMessagePayload,
@@ -40,10 +44,23 @@ import {
     listInventory,
     pickupGroundItemForCharacter
 } from '../inventory/InventoryService';
+import {
+    createFriendRequestByName,
+    getFriendCharacterIds,
+    listFriendSnapshot,
+    respondToFriendRequest
+} from '../friends/FriendService';
 import { CreatureState } from '../state/CreatureState';
 import { GroundItemState } from '../state/GroundItemState';
 import { PlayerState } from '../state/PlayerState';
 import { WorldState } from '../state/WorldState';
+import { TileOverrideState } from '../state/TileOverrideState';
+import {
+    clearWorldTileOverride,
+    listWorldTileOverrides,
+    upsertWorldTileTypeOverride,
+    upsertWorldWalkableOverride
+} from '../world/WorldEditService';
 
 type RoomAuthData = AuthSession & {
     characterId: string;
@@ -58,6 +75,7 @@ type RoomAuthData = AuthSession & {
 type PlayerRuntimeFlags = {
     speedMultiplier: number;
     godMode: boolean;
+    noclip: boolean;
 };
 
 type CreatureSpawnDefinition = {
@@ -72,9 +90,9 @@ const SPAWN_TILES: readonly TilePosition[] = STARTER_CITY_SPAWN_TILES;
 
 const DEFAULT_SPAWN_TILE: TilePosition = STARTER_CITY_DEFAULT_SPAWN;
 
-const CREATURE_MOVE_INTERVAL_MS = 700;
+const CREATURE_MOVE_INTERVAL_MS = 900;
 const CREATURE_RESPAWN_DELAY_MS = 5000;
-const PLAYER_MOVE_COOLDOWN_MS = 120;
+const PLAYER_MOVE_COOLDOWN_MS = 150;
 const ATTACK_RANGE_IN_TILES = 1;
 const ATTACK_DAMAGE = 10;
 const ATTACK_COOLDOWN_MS = 500;
@@ -156,6 +174,7 @@ export class WorldRoom extends Room {
         this.setState(new WorldState());
         this.initializeRoomCreatures();
         void this.syncGroundItemsStateFromDatabase();
+        void this.syncWorldTileOverridesFromDatabase();
 
         this.onMessage(CLIENT_TO_SERVER_MESSAGE.PLAYER_MOVE, (client, payload: unknown) => {
             this.handlePlayerMove(client, payload);
@@ -210,6 +229,39 @@ export class WorldRoom extends Room {
             });
         });
 
+        this.onMessage(CLIENT_TO_SERVER_MESSAGE.FRIENDS_LIST_REQUEST, (client) => {
+            void this.sendFriendSnapshot(client.sessionId).catch((error: unknown) => {
+                const message =
+                    error instanceof Error
+                        ? error.message
+                        : 'Unknown friends sync error.';
+
+                this.sendSystemMessage(client.sessionId, message);
+            });
+        });
+
+        this.onMessage(CLIENT_TO_SERVER_MESSAGE.FRIEND_REQUEST_SEND, (client, payload: unknown) => {
+            void this.handleFriendRequestSend(client, payload).catch((error: unknown) => {
+                const message =
+                    error instanceof Error
+                        ? error.message
+                        : 'Unknown friend request error.';
+
+                this.sendSystemMessage(client.sessionId, message);
+            });
+        });
+
+        this.onMessage(CLIENT_TO_SERVER_MESSAGE.FRIEND_REQUEST_RESPOND, (client, payload: unknown) => {
+            void this.handleFriendRequestRespond(client, payload).catch((error: unknown) => {
+                const message =
+                    error instanceof Error
+                        ? error.message
+                        : 'Unknown friend response error.';
+
+                this.sendSystemMessage(client.sessionId, message);
+            });
+        });
+
         this.setSimulationInterval(() => {
             this.tickCreatures();
         }, CREATURE_MOVE_INTERVAL_MS);
@@ -247,10 +299,13 @@ export class WorldRoom extends Room {
         this.characterIdByPlayerSession.set(client.sessionId, auth.characterId);
         this.runtimeFlagsByPlayer.set(client.sessionId, {
             speedMultiplier: 1,
-            godMode: false
+            godMode: false,
+            noclip: false
         });
 
         void this.sendInventorySnapshot(client.sessionId);
+        void this.syncFriendSnapshotForCharacter(auth.characterId);
+        void this.syncFriendsOfCharacter(auth.characterId);
 
         console.info(`[WorldRoom] ${client.sessionId} joined as ${player.name}`);
     }
@@ -275,6 +330,10 @@ export class WorldRoom extends Room {
         this.lastChatAtByPlayer.delete(client.sessionId);
         this.runtimeFlagsByPlayer.delete(client.sessionId);
         this.characterIdByPlayerSession.delete(client.sessionId);
+
+        if (characterId) {
+            void this.syncFriendsOfCharacter(characterId);
+        }
 
         console.info(`[WorldRoom] ${client.sessionId} left`);
     }
@@ -392,9 +451,11 @@ export class WorldRoom extends Room {
         const commandName = command.toLowerCase();
 
         if (commandName === '/help') {
+            const auth = client.auth as RoomAuthData | undefined;
+
             this.sendSystemMessage(
                 client.sessionId,
-                'Comandos: /help, /w <mensaje>, /pm <nombre> <mensaje>, /announce <mensaje>, /inv, /ground, /drop <slug> <qty>, /pickup <slug> <qty>, /tpme <x> <y>, /tp <jugador> <x> <y>, /speed <jugador> <1-4>, /god <jugador> <on|off>, /giveitem <jugador> <slug> <qty>.'
+                this.getCommandHelpText(auth?.role === 'gm')
             );
             return;
         }
@@ -476,11 +537,8 @@ export class WorldRoom extends Room {
                 return;
             }
 
-            this.broadcastChat({
-                channel: 'world',
-                from: sender.name,
-                text: message
-            });
+            this.sendLocalChat(sender.id, sender.name, message);
+            this.sendSystemMessage(client.sessionId, 'Susurro enviado a jugadores cercanos.');
             return;
         }
 
@@ -647,6 +705,29 @@ export class WorldRoom extends Room {
             return;
         }
 
+        if (commandName === '/noclip') {
+            if (!this.assertGm(client)) {
+                return;
+            }
+
+            const mode = (parts.shift() ?? '').toLowerCase();
+
+            if (mode !== 'on' && mode !== 'off') {
+                this.sendSystemMessage(client.sessionId, 'Uso: /noclip <on|off>');
+                return;
+            }
+
+            const flags = this.getPlayerRuntimeFlags(client.sessionId);
+            flags.noclip = mode === 'on';
+            this.runtimeFlagsByPlayer.set(client.sessionId, flags);
+
+            this.sendSystemMessage(
+                client.sessionId,
+                `Noclip ${mode}. Ahora ${mode === 'on' ? 'puedes' : 'no puedes'} pasar por tiles bloqueados.`
+            );
+            return;
+        }
+
         if (commandName === '/giveitem') {
             if (!this.assertGm(client)) {
                 return;
@@ -682,7 +763,90 @@ export class WorldRoom extends Room {
             return;
         }
 
+        if (commandName === '/settile') {
+            if (!this.assertGm(client)) {
+                return;
+            }
+
+            const tileTypeRaw = parts.shift()?.trim() ?? '';
+            const tileType = this.parseTileTypeValue(tileTypeRaw);
+
+            if (tileType === null) {
+                this.sendSystemMessage(
+                    client.sessionId,
+                    'Uso: /settile <tileType>. Ejemplo: /settile Wall o /settile 1'
+                );
+                return;
+            }
+
+            await this.setTileTypeOverride(sender.tileX, sender.tileY, tileType);
+            this.sendSystemMessage(
+                client.sessionId,
+                `Tile actualizado en ${sender.tileX},${sender.tileY} => ${TileType[tileType]}.`
+            );
+            return;
+        }
+
+        if (commandName === '/destroytile') {
+            if (!this.assertGm(client)) {
+                return;
+            }
+
+            await this.setTileTypeOverride(sender.tileX, sender.tileY, TileType.Grass);
+            await this.setWalkableOverride(sender.tileX, sender.tileY, true);
+            this.sendSystemMessage(
+                client.sessionId,
+                `Tile destruido en ${sender.tileX},${sender.tileY}.`
+            );
+            return;
+        }
+
+        if (commandName === '/tilewalk') {
+            if (!this.assertGm(client)) {
+                return;
+            }
+
+            const mode = (parts.shift() ?? '').trim().toLowerCase();
+
+            if (mode !== 'walk' && mode !== 'block' && mode !== 'default') {
+                this.sendSystemMessage(
+                    client.sessionId,
+                    'Uso: /tilewalk <walk|block|default>'
+                );
+                return;
+            }
+
+            if (mode === 'default') {
+                await this.setWalkableOverride(sender.tileX, sender.tileY, null);
+                this.sendSystemMessage(
+                    client.sessionId,
+                    `Walkable reseteado a default en ${sender.tileX},${sender.tileY}.`
+                );
+                return;
+            }
+
+            await this.setWalkableOverride(sender.tileX, sender.tileY, mode === 'walk');
+            this.sendSystemMessage(
+                client.sessionId,
+                `Walkable forzado a ${mode} en ${sender.tileX},${sender.tileY}.`
+            );
+            return;
+        }
+
         this.sendSystemMessage(client.sessionId, `Comando desconocido: ${commandName}`);
+    }
+
+    private getCommandHelpText(isGm: boolean): string {
+        const playerCommands =
+            '/help, /w <mensaje>, /pm <nombre> <mensaje>, /inv, /ground, /drop <slug> <qty>, /pickup <slug> <qty>';
+        const gmCommands =
+            '/announce <mensaje>, /tpme <x> <y>, /tp <jugador> <x> <y>, /speed <jugador> <1-4>, /god <jugador> <on|off>, /noclip <on|off>, /giveitem <jugador> <slug> <qty>, /settile <tileType>, /destroytile, /tilewalk <walk|block|default>';
+
+        if (isGm) {
+            return `Comandos jugador: ${playerCommands} | GM: ${gmCommands}`;
+        }
+
+        return `Comandos: ${playerCommands}`;
     }
 
     private sendLocalChat(senderSessionId: string, senderName: string, text: string): void {
@@ -803,6 +967,153 @@ export class WorldRoom extends Room {
         }
     }
 
+    private async handleFriendRequestSend(
+        client: Client,
+        payload: unknown
+    ): Promise<void> {
+        if (!isFriendRequestCreateInput(payload)) {
+            throw new Error('Solicitud de amistad invalida.');
+        }
+
+        const sourceCharacterId = this.characterIdByPlayerSession.get(client.sessionId);
+
+        if (!sourceCharacterId) {
+            throw new Error('No se pudo resolver tu personaje.');
+        }
+
+        const result = await createFriendRequestByName(
+            sourceCharacterId,
+            payload.targetName
+        );
+
+        const sender = this.state.players.get(client.sessionId);
+        const senderName = sender?.name ?? 'Un jugador';
+
+        this.sendSystemMessage(
+            client.sessionId,
+            `Solicitud enviada a ${result.targetCharacterName}.`
+        );
+
+        await this.syncFriendSnapshotForCharacter(sourceCharacterId);
+        await this.syncFriendSnapshotForCharacter(result.targetCharacterId);
+
+        const targetSessionIds = this.getSessionIdsByCharacterId(result.targetCharacterId);
+
+        for (const targetSessionId of targetSessionIds) {
+            this.sendSystemMessage(
+                targetSessionId,
+                `${senderName} te envio una solicitud de amistad.`
+            );
+        }
+    }
+
+    private async handleFriendRequestRespond(
+        client: Client,
+        payload: unknown
+    ): Promise<void> {
+        if (!isFriendRequestRespondInput(payload)) {
+            throw new Error('Respuesta de amistad invalida.');
+        }
+
+        const responderCharacterId = this.characterIdByPlayerSession.get(client.sessionId);
+
+        if (!responderCharacterId) {
+            throw new Error('No se pudo resolver tu personaje.');
+        }
+
+        const response = await respondToFriendRequest(
+            responderCharacterId,
+            payload.requestId,
+            payload.accept
+        );
+
+        const responder = this.state.players.get(client.sessionId);
+        const responderName = responder?.name ?? 'Un jugador';
+
+        if (response.accepted) {
+            this.sendSystemMessage(
+                client.sessionId,
+                `Ahora eres amigo de ${response.requesterCharacterName}.`
+            );
+        } else {
+            this.sendSystemMessage(
+                client.sessionId,
+                `Rechazaste la solicitud de ${response.requesterCharacterName}.`
+            );
+        }
+
+        await this.syncFriendSnapshotForCharacter(responderCharacterId);
+        await this.syncFriendSnapshotForCharacter(response.requesterCharacterId);
+
+        const requesterSessionIds = this.getSessionIdsByCharacterId(
+            response.requesterCharacterId
+        );
+
+        for (const requesterSessionId of requesterSessionIds) {
+            this.sendSystemMessage(
+                requesterSessionId,
+                response.accepted
+                    ? `${responderName} acepto tu solicitud de amistad.`
+                    : `${responderName} rechazo tu solicitud de amistad.`
+            );
+        }
+    }
+
+    private async sendFriendSnapshot(sessionId: string): Promise<void> {
+        const characterId = this.characterIdByPlayerSession.get(sessionId);
+
+        if (!characterId) {
+            return;
+        }
+
+        const snapshot = await listFriendSnapshot(
+            characterId,
+            this.getOnlineCharacterIdSet()
+        );
+
+        const client = this.getClientBySessionId(sessionId);
+
+        if (!client) {
+            return;
+        }
+
+        client.send(SERVER_TO_CLIENT_MESSAGE.FRIENDS_SYNC, snapshot);
+    }
+
+    private async syncFriendSnapshotForCharacter(characterId: string): Promise<void> {
+        const sessionIds = this.getSessionIdsByCharacterId(characterId);
+
+        await Promise.all(
+            sessionIds.map((sessionId) => this.sendFriendSnapshot(sessionId))
+        );
+    }
+
+    private async syncFriendsOfCharacter(characterId: string): Promise<void> {
+        const friendIds = await getFriendCharacterIds(characterId);
+
+        await Promise.all(
+            friendIds.map((friendCharacterId) =>
+                this.syncFriendSnapshotForCharacter(friendCharacterId)
+            )
+        );
+    }
+
+    private getOnlineCharacterIdSet(): Set<string> {
+        return new Set<string>(this.characterIdByPlayerSession.values());
+    }
+
+    private getSessionIdsByCharacterId(characterId: string): string[] {
+        const sessionIds: string[] = [];
+
+        for (const [sessionId, mappedCharacterId] of this.characterIdByPlayerSession.entries()) {
+            if (mappedCharacterId === characterId) {
+                sessionIds.push(sessionId);
+            }
+        }
+
+        return sessionIds;
+    }
+
     private resolveTargetTileCoordinate(value: number | undefined, fallback: number): number {
         if (value === undefined) {
             return fallback;
@@ -865,10 +1176,6 @@ export class WorldRoom extends Room {
         }
     }
 
-    private broadcastChat(payload: ChatMessagePayload): void {
-        this.broadcast(SERVER_TO_CLIENT_MESSAGE.CHAT_MESSAGE, payload);
-    }
-
     private broadcastAnnouncement(payload: AnnouncementPayload): void {
         this.broadcast(SERVER_TO_CLIENT_MESSAGE.ANNOUNCEMENT, payload);
     }
@@ -924,7 +1231,7 @@ export class WorldRoom extends Room {
     }
 
     private tryTeleportPlayer(sessionId: string, tileX: number, tileY: number): boolean {
-        if (!isWalkableTile(tileX, tileY)) {
+        if (!this.isTileWalkable(tileX, tileY)) {
             return false;
         }
 
@@ -963,7 +1270,8 @@ export class WorldRoom extends Room {
 
         const defaults: PlayerRuntimeFlags = {
             speedMultiplier: 1,
-            godMode: false
+            godMode: false,
+            noclip: false
         };
 
         this.runtimeFlagsByPlayer.set(sessionId, defaults);
@@ -1029,7 +1337,7 @@ export class WorldRoom extends Room {
                 SPAWN_TILES[(this.nextSpawnIndex + offset) % spawnCount] ??
                 DEFAULT_SPAWN_TILE;
 
-            if (!isWalkableTile(candidate.tileX, candidate.tileY)) {
+            if (!this.isTileWalkable(candidate.tileX, candidate.tileY)) {
                 continue;
             }
 
@@ -1071,7 +1379,7 @@ export class WorldRoom extends Room {
 
     private resolveInitialCreatureSpawn(preferredSpawnTile: TilePosition): TilePosition {
         if (
-            isWalkableTile(preferredSpawnTile.tileX, preferredSpawnTile.tileY) &&
+            this.isTileWalkable(preferredSpawnTile.tileX, preferredSpawnTile.tileY) &&
             !this.isPlayerOnTile(preferredSpawnTile.tileX, preferredSpawnTile.tileY) &&
             !this.isCreatureOnTile(preferredSpawnTile.tileX, preferredSpawnTile.tileY, null)
         ) {
@@ -1080,7 +1388,7 @@ export class WorldRoom extends Room {
 
         for (let tileY = 0; tileY < MAP_HEIGHT_IN_TILES; tileY += 1) {
             for (let tileX = 0; tileX < MAP_WIDTH_IN_TILES; tileX += 1) {
-                if (!isWalkableTile(tileX, tileY)) {
+                if (!this.isTileWalkable(tileX, tileY)) {
                     continue;
                 }
 
@@ -1131,7 +1439,7 @@ export class WorldRoom extends Room {
     }
 
     private canCreatureMoveTo(creatureId: CreatureId, tileX: number, tileY: number): boolean {
-        if (!isWalkableTile(tileX, tileY)) {
+        if (!this.isTileWalkable(tileX, tileY)) {
             return false;
         }
 
@@ -1147,7 +1455,9 @@ export class WorldRoom extends Room {
     }
 
     private canPlayerMoveTo(playerSessionId: string, tileX: number, tileY: number): boolean {
-        if (!isWalkableTile(tileX, tileY)) {
+        const playerFlags = this.getPlayerRuntimeFlags(playerSessionId);
+
+        if (!playerFlags.noclip && !this.isTileWalkable(tileX, tileY)) {
             return false;
         }
 
@@ -1172,6 +1482,160 @@ export class WorldRoom extends Room {
         }
 
         return true;
+    }
+
+    private isTileInsideBounds(tileX: number, tileY: number): boolean {
+        return (
+            tileX >= 0 &&
+            tileY >= 0 &&
+            tileX < MAP_WIDTH_IN_TILES &&
+            tileY < MAP_HEIGHT_IN_TILES
+        );
+    }
+
+    private getTileOverrideState(tileX: number, tileY: number): TileOverrideState | null {
+        const key = `${tileX}:${tileY}`;
+        return this.state.tileOverrides.get(key) ?? null;
+    }
+
+    private isTileWalkable(tileX: number, tileY: number): boolean {
+        if (!this.isTileInsideBounds(tileX, tileY)) {
+            return false;
+        }
+
+        const override = this.getTileOverrideState(tileX, tileY);
+
+        if (override) {
+            if (override.walkableMode === 1) {
+                return true;
+            }
+
+            if (override.walkableMode === 0) {
+                return false;
+            }
+
+            if (override.tileType >= 0) {
+                return !isBlockingTile(override.tileType as TileType);
+            }
+        }
+
+        return isWalkableTile(tileX, tileY);
+    }
+
+    private parseTileTypeValue(raw: string): TileType | null {
+        if (!raw) {
+            return null;
+        }
+
+        const asNumber = Number.parseInt(raw, 10);
+
+        if (Number.isInteger(asNumber) && TileType[asNumber] !== undefined) {
+            return asNumber as TileType;
+        }
+
+        const normalized = raw.trim().toLowerCase();
+
+        for (const [key, value] of Object.entries(TileType)) {
+            if (typeof value !== 'number') {
+                continue;
+            }
+
+            if (key.toLowerCase() === normalized) {
+                return value as TileType;
+            }
+        }
+
+        return null;
+    }
+
+    private applyTileOverrideState(
+        tileX: number,
+        tileY: number,
+        tileTypeOverride: number | null,
+        walkableOverride: boolean | null
+    ): void {
+        const key = `${tileX}:${tileY}`;
+
+        if (tileTypeOverride === null && walkableOverride === null) {
+            this.state.tileOverrides.delete(key);
+            return;
+        }
+
+        let stateEntry = this.state.tileOverrides.get(key);
+
+        if (!stateEntry) {
+            stateEntry = new TileOverrideState();
+            stateEntry.tileX = tileX;
+            stateEntry.tileY = tileY;
+            stateEntry.tileType = -1;
+            stateEntry.walkableMode = -1;
+            this.state.tileOverrides.set(key, stateEntry);
+        }
+
+        stateEntry.tileType = tileTypeOverride ?? -1;
+        stateEntry.walkableMode =
+            walkableOverride === null
+                ? -1
+                : walkableOverride
+                    ? 1
+                    : 0;
+    }
+
+    private async syncWorldTileOverridesFromDatabase(): Promise<void> {
+        const rows = await listWorldTileOverrides();
+        const seenKeys = new Set<string>();
+
+        for (const row of rows) {
+            const key = `${row.tileX}:${row.tileY}`;
+            seenKeys.add(key);
+            this.applyTileOverrideState(
+                row.tileX,
+                row.tileY,
+                row.tileTypeOverride,
+                row.walkableOverride
+            );
+        }
+
+        for (const key of [...this.state.tileOverrides.keys()]) {
+            if (!seenKeys.has(key)) {
+                this.state.tileOverrides.delete(key);
+            }
+        }
+    }
+
+    private async setTileTypeOverride(
+        tileX: number,
+        tileY: number,
+        tileType: TileType
+    ): Promise<void> {
+        const row = await upsertWorldTileTypeOverride(tileX, tileY, tileType);
+        this.applyTileOverrideState(
+            row.tileX,
+            row.tileY,
+            row.tileTypeOverride,
+            row.walkableOverride
+        );
+    }
+
+    private async setWalkableOverride(
+        tileX: number,
+        tileY: number,
+        walkableOverride: boolean | null
+    ): Promise<void> {
+        const row = await upsertWorldWalkableOverride(tileX, tileY, walkableOverride);
+
+        if (row.tileTypeOverride === null && row.walkableOverride === null) {
+            await clearWorldTileOverride(tileX, tileY);
+            this.applyTileOverrideState(tileX, tileY, null, null);
+            return;
+        }
+
+        this.applyTileOverrideState(
+            row.tileX,
+            row.tileY,
+            row.tileTypeOverride,
+            row.walkableOverride
+        );
     }
 
     private killCreature(creature: CreatureState): void {

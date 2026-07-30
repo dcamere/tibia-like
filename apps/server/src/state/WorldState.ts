@@ -3,6 +3,7 @@ import { MapSchema, Schema, type } from '@colyseus/schema';
 import { CreatureState } from './CreatureState';
 import { GroundItemState } from './GroundItemState';
 import { PlayerState } from './PlayerState';
+import { TileOverrideState } from './TileOverrideState';
 
 export class WorldState extends Schema {
     @type({ map: PlayerState })
@@ -14,10 +15,14 @@ export class WorldState extends Schema {
     @type({ map: GroundItemState })
     declare groundItems: MapSchema<GroundItemState>;
 
+    @type({ map: TileOverrideState })
+    declare tileOverrides: MapSchema<TileOverrideState>;
+
     constructor() {
         super();
         this.players = new MapSchema<PlayerState>();
         this.creatures = new MapSchema<CreatureState>();
         this.groundItems = new MapSchema<GroundItemState>();
+        this.tileOverrides = new MapSchema<TileOverrideState>();
     }
 }

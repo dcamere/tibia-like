@@ -6,8 +6,8 @@ export { isBlockingTile, TileType } from './tile-type';
 export const TILE_SIZE = 32;
 
 const MAP_SEED = 1337;
-const GENERATED_MAP_WIDTH_IN_TILES = 80;
-const GENERATED_MAP_HEIGHT_IN_TILES = 80;
+const GENERATED_MAP_WIDTH_IN_TILES = 800;
+const GENERATED_MAP_HEIGHT_IN_TILES = 800;
 const CITY_MIN_X = 8;
 const CITY_MAX_X = 34;
 const CITY_MIN_Y = 8;

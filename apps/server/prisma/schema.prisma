@@ -31,6 +31,12 @@ enum EquipSlot {
   ammo
 }
 
+enum FriendRequestStatus {
+  pending
+  accepted
+  rejected
+}
+
 model Account {
   id           String      @id @default(cuid())
   username     String      @unique
@@ -75,9 +81,56 @@ model Character {
   groundItems   GroundItem[]    @relation("GroundItemOwner")
   partyMembers  PartyMember[]
   partyLeaderOf Party[]         @relation("PartyLeader")
+  sentFriendRequests     FriendRequest[] @relation("FriendRequestFrom")
+  receivedFriendRequests FriendRequest[] @relation("FriendRequestTo")
+  friendshipsA           Friendship[]    @relation("FriendshipA")
+  friendshipsB           Friendship[]    @relation("FriendshipB")
 
   @@unique([accountId, name])
   @@index([accountId])
+}
+
+model FriendRequest {
+  id              String              @id @default(cuid())
+  fromCharacterId String
+  toCharacterId   String
+  status          FriendRequestStatus @default(pending)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  fromCharacter Character @relation("FriendRequestFrom", fields: [fromCharacterId], references: [id], onDelete: Cascade)
+  toCharacter   Character @relation("FriendRequestTo", fields: [toCharacterId], references: [id], onDelete: Cascade)
+
+  @@unique([fromCharacterId, toCharacterId])
+  @@index([toCharacterId, status])
+  @@index([fromCharacterId, status])
+}
+
+model Friendship {
+  id           String   @id @default(cuid())
+  characterAId String
+  characterBId String
+  createdAt    DateTime @default(now())
+
+  characterA Character @relation("FriendshipA", fields: [characterAId], references: [id], onDelete: Cascade)
+  characterB Character @relation("FriendshipB", fields: [characterBId], references: [id], onDelete: Cascade)
+
+  @@unique([characterAId, characterBId])
+  @@index([characterAId])
+  @@index([characterBId])
+}
+
+model WorldTileOverride {
+  id               String   @id @default(cuid())
+  tileX            Int
+  tileY            Int
+  tileTypeOverride Int?
+  walkableOverride Boolean?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([tileX, tileY])
+  @@index([tileX, tileY])
 }
 
 model ItemDefinition {

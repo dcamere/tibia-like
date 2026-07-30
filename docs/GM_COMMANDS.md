@@ -139,6 +139,20 @@ Examples:
 /god test off
 ```
 
+### /noclip <on|off>
+
+Permite al GM ignorar tiles no caminables para moverse por zonas bloqueadas y editar el mundo desde ahi.
+
+Notas:
+- Solo afecta al GM que lo activa.
+- No daña reglas de otros jugadores.
+
+Ejemplos:
+```text
+/noclip on
+/noclip off
+```
+
 ### /giveitem <player> <slug> <qty>
 
 Gives an item directly into target player's inventory.
@@ -152,6 +166,83 @@ Example:
 ```text
 /giveitem test health_potion 5
 ```
+
+### /settile <tileType>
+
+Coloca o reemplaza el tipo de tile EXACTAMENTE en la casilla donde esta parado el GM.
+
+Acepta:
+- nombre de tile (case-insensitive): `Wall`, `Tree`, `Water`, etc.
+- id numerico del tile: `1`, `2`, etc.
+
+Ejemplos:
+```text
+/settile Wall
+/settile 5
+```
+
+### /destroytile
+
+Destruye el bloque en la casilla actual del GM.
+
+Comportamiento:
+- fuerza ese tile a `Grass`
+- fuerza caminable en esa casilla
+
+Ejemplo:
+```text
+/destroytile
+```
+
+### /tilewalk <walk|block|default>
+
+Fuerza si la casilla actual es caminable o bloqueada, independientemente del tipo de tile.
+
+Modos:
+- `walk`: siempre caminable
+- `block`: siempre bloqueado
+- `default`: vuelve a comportamiento normal segun el tile
+
+Ejemplos:
+```text
+/tilewalk walk
+/tilewalk block
+/tilewalk default
+```
+
+## Tile types disponibles
+
+Nombres validos para `/settile`:
+
+- Grass
+- Wall
+- Tree
+- Rock
+- Road
+- Water
+- Bridge
+- Fence
+- LampPost
+- Fountain
+- MarketStall
+- HouseRoof
+- HouseFloor
+- Garden
+- Statue
+- Banner
+- Crate
+- Bush
+- Flower
+
+Tambien puedes usar sus ids numericos (0-18) segun el enum `TileType`.
+
+## Persistencia y alcance
+
+- Todas las ediciones GM de tiles se guardan en base de datos.
+- Se sincronizan en tiempo real para todos los jugadores conectados.
+- Persiste entre reinicios del servidor.
+- Aplica a colisiones/caminabilidad del servidor y al render/pathfinding del cliente.
+- El comando `/noclip` NO se persiste (es runtime) y solo afecta al GM activo.
 
 ## Notes for developers
 
